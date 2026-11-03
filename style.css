@@ -16,7 +16,8 @@
 
   --pad: clamp(1.25rem, 5vw, 4rem);
   --ease: ease-in-out;
-  --t-fade: 0.9s;
+  --t-fade: 1.2s;
+  --t-line: 0.7s;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -68,6 +69,37 @@ body {
 }
 #cover.is-on { opacity: 1; pointer-events: auto; }
 
+/* ---- Sound toggle (shared chrome; revealed by Act I after the opening) --- */
+
+.sound-toggle {
+  position: fixed;
+  right: max(0.5rem, env(safe-area-inset-right));
+  bottom: max(0.5rem, env(safe-area-inset-bottom));
+  z-index: 50;
+  min-height: 2.75rem;
+  min-width: 2.75rem;
+  padding: 0 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  line-height: 1;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid transparent;
+  cursor: pointer;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 1.2s var(--ease), visibility 0s linear 1.2s,
+              color 0.3s var(--ease), border-color 0.3s var(--ease);
+}
+.sound-toggle.is-on {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s, 0s, 0s, 0s;
+}
+.sound-toggle:hover { color: var(--text); border-color: var(--rain); }
+
 /* ==========================================================================
    ACT I
    ========================================================================== */
@@ -82,7 +114,7 @@ body {
   display: block;
   z-index: 0;
   opacity: 1;
-  transition: opacity 1.2s var(--ease);
+  transition: opacity 1.6s var(--ease);
 }
 .a1-rain.is-subdued { opacity: 0.4; }
 .a1-rain.is-off { opacity: 0; }
@@ -93,7 +125,7 @@ body {
   z-index: 1;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 1.2s var(--ease);
+  transition: opacity 1.6s var(--ease);
   background: radial-gradient(ellipse 75% 65% at 50% 50%,
     rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0.45) 55%, rgba(0, 0, 0, 0) 100%);
 }
@@ -196,7 +228,7 @@ body {
   text-shadow: 0 0 12px #000;
   opacity: 0;
   visibility: hidden;
-  transition: opacity 0.35s var(--ease), visibility 0s linear 0.35s;
+  transition: opacity var(--t-line) var(--ease), visibility 0s linear var(--t-line);
 }
 .a1-line--solo.is-on {
   opacity: 1;
@@ -222,6 +254,37 @@ body {
 .a1-status { color: var(--text-3); letter-spacing: 0.32em; transition: opacity 0.6s var(--ease); }
 .a1-status.is-off { opacity: 0; }
 
+/* ---- Continue cue (shown only while a screen waits for a click) --------- */
+
+.a1-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 3.6rem;
+  z-index: 5;
+  padding: 0 var(--pad);
+  text-align: center;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--t-fade) var(--ease);
+}
+.a1-hint.is-on { opacity: 1; }
+.a1-hint span {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  line-height: 1.7;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  text-shadow: 0 0 8px #000, 0 0 2px #000;
+}
+.a1-hint.is-on span { animation: a1-breathe 3.6s var(--ease) infinite; }
+@keyframes a1-breathe {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
 /* ---- Counter ------------------------------------------------------------ */
 
 .a1-counter {
@@ -240,7 +303,7 @@ body {
   line-height: 1.1;
   color: var(--text);
   text-shadow: 0 0 18px rgba(120, 185, 130, 0.35), 0 0 2px #000;
-  transition: font-size 1.2s var(--ease), color 0.35s var(--ease);
+  transition: font-size 1.6s var(--ease), color 0.35s var(--ease);
 }
 .a1-num.is-prominent { font-size: clamp(1.9rem, 8.6vw, 5rem); }
 .a1-num.is-flash { color: var(--hi); }
@@ -254,7 +317,7 @@ body {
   align-items: center;
   opacity: 0;
   transform: scale(0.96);
-  transition: opacity 1s var(--ease), transform 1s var(--ease);
+  transition: opacity 1.4s var(--ease), transform 1.4s var(--ease);
 }
 .a1-memory-wrap.is-on { opacity: 1; transform: none; }
 
@@ -331,7 +394,7 @@ body {
   overflow: visible;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 1s var(--ease);
+  transition: opacity 1.4s var(--ease);
 }
 .a1-arcs.is-on { opacity: 1; }
 .a1-arc { fill: none; stroke: var(--hi); stroke-width: 1.25; stroke-dasharray: 3 3; opacity: 0.85; }
@@ -346,7 +409,7 @@ body {
   opacity: 0;
   visibility: hidden;
   transform: translateY(6px);
-  transition: opacity 0.5s var(--ease), transform 0.5s var(--ease), visibility 0s linear 0.5s;
+  transition: opacity 0.7s var(--ease), transform 0.7s var(--ease), visibility 0s linear 0.7s;
 }
 .a1-tile.is-on { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
 
@@ -360,7 +423,7 @@ body {
   color: var(--text);
   background: var(--bg-deep);
   border: 1px solid var(--rain);
-  transition: opacity 0.9s var(--ease), border-color 0.9s var(--ease), color 0.9s var(--ease);
+  transition: opacity 1.2s var(--ease), border-color 1.2s var(--ease), color 1.2s var(--ease);
 }
 .a1-tile-idx { font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-3); }
 .a1-tile-tag {
@@ -369,7 +432,7 @@ body {
   min-height: 1em;
   color: var(--text-3);
   opacity: 0;
-  transition: opacity 0.9s var(--ease);
+  transition: opacity 1.2s var(--ease);
 }
 .a1-tile-tag.is-on { opacity: 1; }
 
@@ -465,17 +528,9 @@ fieldset:disabled .a1-opt { cursor: default; }
   font-family: var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.3em;
-  font-size: clamp(0.95rem, 3vw, 1.3rem);
+  font-size: clamp(1rem, 3.4vw, 1.6rem);
+  line-height: 1.6;
   color: var(--hi);
-}
-.a1-closing-2 {
-  margin: 0;
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.2em;
-  font-size: clamp(0.8rem, 2.4vw, 1.05rem);
-  line-height: 1.7;
-  color: var(--text);
 }
 
 /* ---- Reduced motion ----------------------------------------------------- */
@@ -488,4 +543,5 @@ fieldset:disabled .a1-opt { cursor: default; }
     animation-delay: 0s !important;
     scroll-behavior: auto !important;
   }
+  .a1-hint.is-on span { animation: none !important; }
 }

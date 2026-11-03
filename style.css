@@ -1,1 +1,491 @@
+/* ==========================================================================
+   THE THINNEST SLICE — global design system + Act I styles (.a1-*)
+   ========================================================================== */
 
+:root {
+  --bg: #000000;
+  --bg-deep: #07100A;
+  --rain: #1D512B;
+  --hi: #78B982;
+  --text: #D9F3DD;
+  --text-2: #9CB7A0;
+  --text-3: #607A65;
+
+  --font-prose: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+
+  --pad: clamp(1.25rem, 5vw, 4rem);
+  --ease: ease-in-out;
+  --t-fade: 0.9s;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-prose);
+  -webkit-font-smoothing: antialiased;
+  text-size-adjust: 100%;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 3px;
+}
+
+#app { position: fixed; inset: 0; }
+#stage { position: absolute; inset: 0; }
+
+.act { position: absolute; inset: 0; overflow: hidden; background: var(--bg); }
+
+#cover {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 100;
+  transition: opacity 0.7s var(--ease);
+}
+#cover.is-on { opacity: 1; pointer-events: auto; }
+
+/* ==========================================================================
+   ACT I
+   ========================================================================== */
+
+/* ---- Background layers -------------------------------------------------- */
+
+.a1-rain {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  z-index: 0;
+  opacity: 1;
+  transition: opacity 1.2s var(--ease);
+}
+.a1-rain.is-subdued { opacity: 0.4; }
+.a1-rain.is-off { opacity: 0; }
+
+.a1-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 1.2s var(--ease);
+  background: radial-gradient(ellipse 75% 65% at 50% 50%,
+    rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0.45) 55%, rgba(0, 0, 0, 0) 100%);
+}
+.a1-veil.is-on { opacity: 1; }
+
+/* ---- Sections ----------------------------------------------------------- */
+
+.a1-sec {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  padding: var(--pad);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  opacity: 0;
+  transition: opacity var(--t-fade) var(--ease);
+}
+.a1-sec[hidden] { display: none; }
+.a1-sec.is-on { opacity: 1; }
+
+.a1-secB {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(rgba(29, 81, 43, 0.14) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(29, 81, 43, 0.14) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+.a1-stack {
+  margin: auto;            /* centres, but stays scroll-safe when taller than viewport */
+  width: 100%;
+  max-width: 42rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  text-shadow: 0 0 10px #000, 0 0 2px #000;
+}
+
+/* ---- Fade / slide primitives ------------------------------------------- */
+
+.a1-fade {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--t-fade) var(--ease), visibility 0s linear var(--t-fade);
+}
+.a1-fade.is-on {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s, 0s;
+}
+
+.a1-slide {
+  display: grid;
+  grid-template-rows: 0fr;
+  width: 100%;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    grid-template-rows var(--t-fade) var(--ease),
+    opacity var(--t-fade) var(--ease),
+    visibility 0s linear var(--t-fade);
+}
+.a1-slide.is-on {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s, 0s, 0s;
+}
+.a1-slide-in {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.a1-pad { padding: 0.5rem; width: 100%; display: flex; flex-direction: column; align-items: center; }
+
+/* ---- Typography --------------------------------------------------------- */
+
+.a1-line {
+  margin: 0;
+  font-size: clamp(1.15rem, 3.2vw, 1.75rem);
+  line-height: 1.5;
+  font-weight: 300;
+  letter-spacing: 0.01em;
+  color: var(--text);
+}
+
+.a1-line--solo {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--pad);
+  font-size: clamp(1.4rem, 4.2vw, 2.4rem);
+  text-align: center;
+  text-shadow: 0 0 12px #000;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.35s var(--ease), visibility 0s linear 0.35s;
+}
+.a1-line--solo.is-on {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s, 0s;
+}
+
+.a1-label,
+.a1-kicker,
+.a1-cap,
+.a1-status,
+.a1-count dt,
+.a1-formal-label {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.28em;
+  font-size: 0.72rem;
+  margin: 0;
+}
+.a1-label { color: var(--text-2); }
+.a1-kicker { color: var(--text-2); margin-bottom: 0.5rem; }
+.a1-cap { color: var(--text-3); margin-top: 0.7rem; letter-spacing: 0.22em; font-size: 0.66rem; }
+.a1-status { color: var(--text-3); letter-spacing: 0.32em; transition: opacity 0.6s var(--ease); }
+.a1-status.is-off { opacity: 0; }
+
+/* ---- Counter ------------------------------------------------------------ */
+
+.a1-counter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+  max-width: 100%;
+}
+.a1-num {
+  margin: 0;
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: clamp(2rem, 9vw, 3.25rem);
+  line-height: 1.1;
+  color: var(--text);
+  text-shadow: 0 0 18px rgba(120, 185, 130, 0.35), 0 0 2px #000;
+  transition: font-size 1.2s var(--ease), color 0.35s var(--ease);
+}
+.a1-num.is-prominent { font-size: clamp(1.9rem, 8.6vw, 5rem); }
+.a1-num.is-flash { color: var(--hi); }
+.a1-counter.is-frozen .a1-num { color: var(--hi); }
+
+/* ---- Memory metaphor ---------------------------------------------------- */
+
+.a1-memory-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  opacity: 0;
+  transform: scale(0.96);
+  transition: opacity 1s var(--ease), transform 1s var(--ease);
+}
+.a1-memory-wrap.is-on { opacity: 1; transform: none; }
+
+.a1-memory {
+  display: flex;
+  gap: clamp(0.25rem, 1.2vw, 0.5rem);
+  padding: clamp(0.45rem, 1.6vw, 0.75rem);
+  border: 1px solid var(--hi);
+  background: rgba(7, 16, 10, 0.9);
+  max-width: 100%;
+}
+.a1-slot {
+  display: block;
+  width: clamp(1.35rem, 5.5vw, 2.6rem);
+  height: clamp(1.35rem, 5.5vw, 2.6rem);
+  border: 1px dashed var(--rain);
+  background: #000;
+}
+
+/* ---- Question + button -------------------------------------------------- */
+
+.a1-q {
+  margin: 0;
+  font-size: clamp(1.1rem, 3vw, 1.5rem);
+  line-height: 1.4;
+  font-weight: 400;
+  color: var(--text);
+}
+
+.a1-btn {
+  min-height: 3rem;
+  min-width: 11rem;
+  padding: 0 2rem;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  color: var(--text);
+  background: rgba(7, 16, 10, 0.9);
+  border: 1px solid var(--hi);
+  cursor: pointer;
+  transition: background-color 0.3s var(--ease), color 0.3s var(--ease);
+}
+.a1-btn:hover:not(:disabled) { background: rgba(120, 185, 130, 0.18); }
+.a1-btn:disabled {
+  cursor: not-allowed;
+  color: var(--text-3);
+  border-color: var(--rain);
+  border-style: dashed;
+}
+
+/* ---- Scene 3: stream ---------------------------------------------------- */
+
+.a1-stream-wrap {
+  --tile: clamp(2rem, 9.4vw, 3.5rem);
+  --tg: clamp(0.25rem, 1.2vw, 0.75rem);
+  position: relative;
+  margin-top: 3.9rem;      /* room for connector arcs */
+  max-width: 100%;
+}
+.a1-stream {
+  position: relative;
+  display: flex;
+  gap: var(--tg);
+  justify-content: center;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.a1-arcs {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 4px);
+  overflow: visible;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 1s var(--ease);
+}
+.a1-arcs.is-on { opacity: 1; }
+.a1-arc { fill: none; stroke: var(--hi); stroke-width: 1.25; stroke-dasharray: 3 3; opacity: 0.85; }
+.a1-arc-dot { fill: var(--hi); }
+
+.a1-tile {
+  width: var(--tile);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(6px);
+  transition: opacity 0.5s var(--ease), transform 0.5s var(--ease), visibility 0s linear 0.5s;
+}
+.a1-tile.is-on { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
+
+.a1-tile-box {
+  width: var(--tile);
+  height: var(--tile);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: calc(var(--tile) * 0.5);
+  color: var(--text);
+  background: var(--bg-deep);
+  border: 1px solid var(--rain);
+  transition: opacity 0.9s var(--ease), border-color 0.9s var(--ease), color 0.9s var(--ease);
+}
+.a1-tile-idx { font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-3); }
+.a1-tile-tag {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  min-height: 1em;
+  color: var(--text-3);
+  opacity: 0;
+  transition: opacity 0.9s var(--ease);
+}
+.a1-tile-tag.is-on { opacity: 1; }
+
+.a1-tile.is-first .a1-tile-box { border-color: var(--hi); color: var(--text); box-shadow: 0 0 14px rgba(120, 185, 130, 0.25); }
+.a1-tile.is-first .a1-tile-tag { color: var(--hi); }
+.a1-tile.is-repeat .a1-tile-box { opacity: 0.6; border-style: dashed; border-color: var(--text-3); color: var(--text-2); }
+
+/* ---- Scene 3: choice ---------------------------------------------------- */
+
+.a1-form { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 1.25rem; margin: 0; }
+.a1-form fieldset { border: 0; margin: 0; padding: 0; min-width: 0; width: 100%; }
+.a1-form legend { display: block; width: 100%; padding: 0; margin: 0 0 1rem; text-align: center; }
+.a1-opts { display: grid; gap: 0.75rem; width: min(100%, 26rem); margin: 0 auto; }
+.a1-opt {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  min-height: 3.25rem;
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--rain);
+  background: rgba(7, 16, 10, 0.88);
+  color: var(--text);
+  font-size: 1.05rem;
+  text-align: left;
+  text-shadow: none;
+  cursor: pointer;
+  transition: border-color 0.3s var(--ease), background-color 0.3s var(--ease);
+}
+.a1-opt input { width: 1.2rem; height: 1.2rem; margin: 0; accent-color: var(--hi); flex: none; }
+.a1-opt.is-checked { border-color: var(--hi); background: rgba(120, 185, 130, 0.14); }
+.a1-opt:focus-within { outline: 2px solid var(--text); outline-offset: 3px; }
+fieldset:disabled .a1-opt { cursor: default; }
+
+/* ---- Scene 3: reveal ---------------------------------------------------- */
+
+.a1-picked { margin: 0 0 1.25rem; font-size: clamp(1.05rem, 2.8vw, 1.3rem); color: var(--text); }
+.a1-counts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 1rem clamp(1.25rem, 5vw, 3rem);
+  margin: 0 0 1.5rem;
+  padding: 0;
+}
+.a1-count { display: flex; flex-direction: column-reverse; align-items: center; gap: 0.4rem; }
+.a1-count dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: clamp(2rem, 8vw, 3.25rem);
+  line-height: 1;
+  color: var(--text);
+}
+.a1-count dt { color: var(--text-2); letter-spacing: 0.2em; }
+.a1-mine { color: var(--hi); }
+.a1-count.is-mine dd { color: var(--hi); }
+
+.a1-explain { display: grid; gap: 0.6rem; max-width: 34rem; }
+.a1-expl { margin: 0; font-size: clamp(0.98rem, 2.4vw, 1.15rem); line-height: 1.5; color: var(--text-2); }
+.a1-expl--key { color: var(--text); }
+
+/* ---- Scene 4 ------------------------------------------------------------ */
+
+.a1-s4line { margin: 0; font-size: clamp(1.05rem, 2.8vw, 1.45rem); line-height: 1.5; font-weight: 300; color: var(--text); }
+.a1-challenge {
+  margin: 0;
+  font-size: clamp(1.4rem, 4.4vw, 2.3rem);
+  line-height: 1.35;
+  font-weight: 300;
+  color: var(--text);
+}
+.a1-support { margin: 0; font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--text-2); line-height: 1.7; }
+
+.a1-formal {
+  width: 100%;
+  display: grid;
+  gap: 0.9rem;
+  text-align: left;
+  padding: 0.4rem 0 0.4rem 1.25rem;
+  border-left: 1px solid var(--rain);
+  text-shadow: none;
+}
+.a1-formal-label { color: var(--text-3); margin-bottom: 0.25rem; }
+.a1-formal-row p { margin: 0; color: var(--text-2); line-height: 1.5; font-size: 1rem; }
+.a1-formal-note { font-size: 0.9rem !important; color: var(--text-3) !important; }
+.a1-formal math {
+  color: var(--text);
+  font-family: "STIX Two Math", "Latin Modern Math", "Cambria Math", "Noto Sans Math", math, serif;
+  font-size: clamp(1.15rem, 3.6vw, 1.5rem);
+}
+
+.a1-closing-1 {
+  margin: 0;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.3em;
+  font-size: clamp(0.95rem, 3vw, 1.3rem);
+  color: var(--hi);
+}
+.a1-closing-2 {
+  margin: 0;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  font-size: clamp(0.8rem, 2.4vw, 1.05rem);
+  line-height: 1.7;
+  color: var(--text);
+}
+
+/* ---- Reduced motion ----------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
+}

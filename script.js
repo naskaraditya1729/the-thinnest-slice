@@ -13,8 +13,17 @@
      root:     HTMLElement — the Act's own container (owned by the controller)
      announce: (message) => void — polite screen-reader announcement
      motion:   { reduced(): boolean, subscribe(cb): unsubscribeFn }
+     audio:    shared sound engine (see below)
      complete: () => void — the Act is finished; the controller enters the next
    }
+
+   Shared audio engine (ctx.audio):
+     context():      AudioContext, or null if the browser has no Web Audio
+     output:         GainNode (master bus) — Acts connect their own nodes here
+     running():      true once the browser has allowed audio (needs a gesture)
+     revealToggle(): fades in the small ENABLE SOUND / SOUND ON / SOUND OFF
+                     button (bottom right)
+   Acts own every node they create and must disconnect them on exit.
    ========================================================================== */
 
 (function () {
@@ -29,6 +38,7 @@
   const stage = document.getElementById('stage');
   const live = document.getElementById('live');
   const cover = document.getElementById('cover');
+  const app = document.getElementById('app');
 
   let current = null;       // { index, mod, section, completed }
   let transitioning = false;
@@ -60,6 +70,115 @@
 
   const wait = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
   const actId = function (index) { return 'act' + (index + 1); };
+
+  /* ---- Shared audio engine ---------------------------------------------- */
+
+  const audio = (function () {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const MASTER_LEVEL = 0.85;
+    let ac = null, master = null, comp = null;
+    let muted = false, suspendedByHidden = false;
+    let btn = null;
+
+    if (AC) {
+      try {
+        ac = new AC();
+        comp = ac.createDynamicsCompressor();
+        comp.threshold.value = -20;
+        comp.knee.value = 24;
+        comp.ratio.value = 4;
+        comp.attack.value = 0.01;
+        comp.release.value = 0.3;
+        master = ac.createGain();
+        master.gain.value = MASTER_LEVEL;
+        master.connect(comp);
+        comp.connect(ac.destination);
+      } catch (err) {
+        ac = null; master = null;
+        console.warn('[Audio] Web Audio unavailable:', err);
+      }
+    }
+
+    function running() { return !!ac && ac.state === 'running'; }
+
+    function label() {
+      if (!running()) return ['ENABLE SOUND', 'Enable sound'];
+      return muted
+        ? ['SOUND OFF', 'Sound is off. Activate to turn sound on.']
+        : ['SOUND ON', 'Sound is on. Activate to mute.'];
+    }
+
+    function updateButton() {
+      if (!btn) return;
+      const l = label();
+      btn.textContent = l[0];
+      btn.setAttribute('aria-label', l[1]);
+    }
+
+    function applyMute() {
+      if (!master) return;
+      const t = ac.currentTime;
+      master.gain.cancelScheduledValues(t);
+      master.gain.setTargetAtTime(muted ? 0 : MASTER_LEVEL, t, 0.06);
+    }
+
+    /* Unlock: browsers only allow audio after a user gesture. */
+    const GESTURES = ['pointerdown', 'touchend', 'keydown', 'click'];
+    function onGesture(e) {
+      if (!ac) return;
+      if (btn && e && btn.contains(e.target)) return;   // the toggle handles itself
+      ac.resume().then(function () {
+        if (ac.state === 'running') unbind();
+        updateButton();
+      }).catch(function () {});
+    }
+    function unbind() {
+      GESTURES.forEach(function (t) { window.removeEventListener(t, onGesture, true); });
+    }
+
+    if (ac) {
+      GESTURES.forEach(function (t) { window.addEventListener(t, onGesture, true); });
+      ac.onstatechange = updateButton;
+      ac.resume().then(function () { if (ac.state === 'running') unbind(); updateButton(); }).catch(function () {});
+
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+          if (ac.state === 'running') { suspendedByHidden = true; ac.suspend().catch(function () {}); }
+        } else if (suspendedByHidden) {
+          suspendedByHidden = false;
+          ac.resume().catch(function () {});
+        }
+      });
+    }
+
+    function ensureButton() {
+      if (btn || !ac) return;
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'sound-toggle';
+      btn.addEventListener('click', function () {
+        if (!running()) { ac.resume().then(updateButton).catch(function () {}); return; }
+        muted = !muted;
+        applyMute();
+        updateButton();
+      });
+      app.appendChild(btn);
+      updateButton();
+    }
+
+    function revealToggle() {
+      if (!ac) return;
+      ensureButton();
+      requestAnimationFrame(function () { if (btn) btn.classList.add('is-on'); });
+    }
+
+    return {
+      context: function () { return ac; },
+      output: master,
+      running: running,
+      revealToggle: revealToggle
+    };
+  })();
 
   /* ---- Act registry and loading ----------------------------------------- */
 
@@ -98,6 +217,7 @@
       root: section,
       announce: announce,
       motion: motion,
+      audio: audio,
       complete: function () { handleComplete(index); }
     });
     return true;
@@ -142,7 +262,8 @@
   window.TheThinnestSlice = {
     registerAct: registerAct,
     motion: motion,
-    announce: announce
+    announce: announce,
+    audio: audio
   };
 
   enterAct(0).then(function (ok) {

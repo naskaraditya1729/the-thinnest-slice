@@ -35,7 +35,7 @@
       'And you cannot remember everything.'
     ],
     s2q: 'Can you still figure out how many different elements have arrived?',
-    s3q: 'How many elements have arrived?',
+    s3q: 'How many distinct elements have arrived?',
     s3expl: [
       'The number of arrivals tells us how much data has passed through the stream.',
       'The number of distinct elements tells us how many different values it contains.',
@@ -65,7 +65,8 @@
     sparkle: 0.014,  // glyph shimmer
     tick: 0.02,      // counter ticks
     chime: 0.07,     // bells
-    riser: 0.05      // Scene 2 tension riser
+    riser: 0.05,     // Scene 2 tension riser
+    pulse: 0.3       // heartbeat thump
   };
   // D major pentatonic
   const PENT_HI = [587.33, 659.25, 739.99, 880.0, 987.77, 1174.66, 1318.51, 1479.98, 1760.0];
@@ -77,9 +78,9 @@
     warm: { root: 73.42, fifth: 110.0,  third: 92.5,   oct: 185.0,  g3: 0.6 },
     low:  { root: 36.71, fifth: 55.0,   third: 46.25,  oct: 73.42,  g3: 0.2 }
   };
-  const SND_API = ['setMood', 'setDrone', 'setRain', 'setSparkle', 'setTick', 'setRiser',
-    'chime', 'note', 'dull', 'pop', 'confirm', 'milestone', 'eight', 'glimmer',
-    'impact', 'swell', 'freeze', 'restore', 'fadeOut', 'destroy'];
+  const SND_API = ['setMood', 'setDrone', 'setRain', 'setSparkle', 'setTick', 'setRiser', 'setPulse',
+    'chime', 'note', 'dull', 'pop', 'tap', 'wrong', 'success', 'confirm', 'milestone', 'eight',
+    'glimmer', 'whoosh', 'beat', 'swell', 'riseIn', 'boom', 'freeze', 'restore', 'fadeOut', 'destroy'];
 
   /* ========================================================================
      Procedural sound engine for this Act
@@ -212,16 +213,17 @@
 
     longOscs.forEach(function (o) { o.start(); });
 
-    /* Event loops (counter ticks, glyph sparkle) */
+    /* Event loops (counter ticks, glyph sparkle, heartbeat) */
     let dead = false;
-    let sparkleRate = 0, tickRate = 0, tickHz = 300;
+    let sparkleRate = 0, tickRate = 0, tickHz = 300, pulseRate = 0;
     const loopTimers = new Set();
 
-    function loop(getRate, fn) {
+    function loop(getRate, fn, steady) {
       (function step() {
         if (dead) return;
         const r = getRate();
-        const waitMs = r > 0 ? (1000 / r) * (0.6 + Math.random() * 0.8) : 120;
+        const jitter = steady ? 1 : (0.6 + Math.random() * 0.8);
+        const waitMs = r > 0 ? (1000 / r) * jitter : 120;
         const id = setTimeout(function () {
           loopTimers.delete(id);
           if (dead) return;
@@ -264,6 +266,102 @@
       });
     }
 
+    /* Low heartbeat-style thump (sub sine + audible harmonic) */
+    function thump(gain, delay) {
+      if (dead || !running()) return;
+      const t = ac.currentTime + (delay || 0);
+      [['sine', 70, 42, 1], ['triangle', 140, 84, 0.35]].forEach(function (v) {
+        const o = ac.createOscillator();
+        o.type = v[0];
+        o.frequency.setValueAtTime(v[1], t);
+        o.frequency.exponentialRampToValueAtTime(v[2], t + 0.18);
+        const g = ac.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.linearRampToValueAtTime(gain * v[3], t + 0.008);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.32);
+        o.connect(g);
+        g.connect(bus);
+        o.start(t);
+        o.stop(t + 0.35);
+        o.onended = function () { o.disconnect(); g.disconnect(); };
+      });
+    }
+
+    /* Short filtered noise burst */
+    function burst(t, type, freq, gain, dur) {
+      const n = ac.createBufferSource();
+      n.buffer = noiseBuf;
+      const f = ac.createBiquadFilter();
+      f.type = type;
+      f.frequency.value = freq;
+      const g = ac.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(gain, t + 0.002);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      n.connect(f); f.connect(g); g.connect(bus); g.connect(send);
+      n.start(t, Math.random());
+      n.stop(t + dur + 0.05);
+      n.onended = function () { n.disconnect(); f.disconnect(); g.disconnect(); };
+    }
+
+    /* One cinematic hit: sub drop + mid thump + crack + body (+ resonant tail) */
+    function hit(t, lvl, f0, f1, decay, tail) {
+      const sub = ac.createOscillator();
+      sub.type = 'sine';
+      sub.frequency.setValueAtTime(f0, t);
+      sub.frequency.exponentialRampToValueAtTime(f1, t + 0.55);
+      const sg = ac.createGain();
+      sg.gain.setValueAtTime(0.0001, t);
+      sg.gain.linearRampToValueAtTime(0.6 * lvl, t + 0.004);
+      sg.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+      sub.connect(sg); sg.connect(bus); sg.connect(send);
+      sub.start(t);
+      sub.stop(t + decay + 0.05);
+      sub.onended = function () { sub.disconnect(); sg.disconnect(); };
+
+      const mid = ac.createOscillator();
+      mid.type = 'triangle';
+      mid.frequency.setValueAtTime(f0 * 2, t);
+      mid.frequency.exponentialRampToValueAtTime(f1 * 2, t + 0.4);
+      const mg = ac.createGain();
+      mg.gain.setValueAtTime(0.0001, t);
+      mg.gain.linearRampToValueAtTime(0.22 * lvl, t + 0.004);
+      mg.gain.exponentialRampToValueAtTime(0.0001, t + decay * 0.4);
+      mid.connect(mg); mg.connect(bus);
+      mid.start(t);
+      mid.stop(t + decay * 0.4 + 0.05);
+      mid.onended = function () { mid.disconnect(); mg.disconnect(); };
+
+      burst(t, 'highpass', 1800, 0.22 * lvl, 0.07);   // sharp crack
+      burst(t, 'lowpass', 700, 0.2 * lvl, 0.38);       // body
+
+      if (tail) {
+        const lp = ac.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.Q.value = 2;
+        lp.frequency.setValueAtTime(2800, t);
+        lp.frequency.exponentialRampToValueAtTime(240, t + 4);
+        const tg = ac.createGain();
+        tg.gain.setValueAtTime(0.0001, t);
+        tg.gain.linearRampToValueAtTime(0.07, t + 0.02);
+        tg.gain.exponentialRampToValueAtTime(0.0001, t + 5);
+        lp.connect(tg); tg.connect(bus); tg.connect(send);
+        const chord = [73.42, 110.0, 146.83, 220.0, 293.66];
+        chord.forEach(function (f, i) {
+          const o = ac.createOscillator();
+          o.type = 'sawtooth';
+          o.frequency.value = f * (i % 2 ? 1.003 : 0.997);
+          o.connect(lp);
+          o.start(t);
+          o.stop(t + 5.1);
+          o.onended = function () {
+            o.disconnect();
+            if (i === chord.length - 1) { lp.disconnect(); tg.disconnect(); }
+          };
+        });
+      }
+    }
+
     loop(function () { return sparkleRate; }, function () {
       const f = PENT_HI[(Math.random() * PENT_HI.length) | 0];
       tone(f, { gain: SND.sparkle * (0.5 + Math.random()), att: 0.004, dur: 0.5 + Math.random() * 0.7 });
@@ -271,6 +369,10 @@
     loop(function () { return tickRate; }, function () {
       tone(tickHz * (1 + Math.random() * 0.02), { type: 'triangle', gain: SND.tick, att: 0.002, dur: 0.03, wet: false });
     });
+    loop(function () { return pulseRate; }, function () {
+      thump(SND.pulse);
+      thump(SND.pulse * 0.6, 0.24);
+    }, true);
 
     /* ---- API ---- */
 
@@ -292,6 +394,7 @@
       },
       setSparkle: function (rate) { sparkleRate = rate; },
       setTick: function (rate, hz) { tickRate = rate; tickHz = hz; },
+      setPulse: function (rate) { pulseRate = rate; },
       setRiser: function (p) {
         const q = Math.max(0, Math.min(1, p));
         ramp(riseGain.gain, Math.pow(q, 1.6) * SND.riser, 0.1);
@@ -306,6 +409,17 @@
       note: function (f) { tone(f, { type: 'triangle', gain: 0.055, att: 0.01, dur: 0.9 }); },
       dull: function (f, delay) { tone(f * 0.5, { gain: 0.05, att: 0.01, dur: 0.35, wet: false, delay: delay || 0 }); },
       pop: function () { tone(1800, { gain: 0.03, att: 0.001, dur: 0.05, wet: false }); },
+      tap: function () {
+        tone(900 + Math.random() * 300, { type: 'triangle', gain: 0.014, att: 0.001, dur: 0.035, wet: false });
+      },
+      wrong: function () {
+        tone(110.0, { type: 'triangle', gain: 0.09, att: 0.004, dur: 0.3, wet: false });
+        tone(116.54, { type: 'triangle', gain: 0.07, att: 0.004, dur: 0.3, wet: false });
+        thump(0.16);
+      },
+      success: function () {
+        [0, 2, 3, 5, 7].forEach(function (k, i) { api.chime(PENT_HI[k], 0.7, i * 0.09); });
+      },
       confirm: function () { api.chime(440, 1, 0); api.chime(659.25, 0.8, 0.09); },
       milestone: function (i) { api.chime([293.66, 440, 587.33, 880][i] || 440, 1.1, 0); },
       eight: function () {
@@ -314,35 +428,34 @@
       glimmer: function () {
         [0, 2, 4, 5, 7].forEach(function (k, i) { api.chime(PENT_HI[k], 0.5, i * 0.12); });
       },
+      beat: function () {            // a single "lub-dub"
+        thump(SND.pulse);
+        thump(SND.pulse * 0.6, 0.24);
+      },
 
-      impact: function () {
+      /* Filtered-noise sweep between scenes */
+      whoosh: function (secs) {
         if (dead || !running()) return;
+        secs = secs || 1.6;
         const t = ac.currentTime;
-        const o = ac.createOscillator();
-        o.type = 'sine';
-        o.frequency.setValueAtTime(96, t);
-        o.frequency.exponentialRampToValueAtTime(38, t + 0.7);
-        const g = ac.createGain();
-        g.gain.setValueAtTime(0.0001, t);
-        g.gain.linearRampToValueAtTime(0.4, t + 0.01);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + 2.4);
-        o.connect(g); g.connect(bus); g.connect(send);
-        o.start(t); o.stop(t + 2.5);
-        o.onended = function () { o.disconnect(); g.disconnect(); };
-
         const n = ac.createBufferSource();
         n.buffer = noiseBuf;
-        const lp = ac.createBiquadFilter();
-        lp.type = 'lowpass';
-        lp.frequency.value = 420;
-        const ng = ac.createGain();
-        ng.gain.setValueAtTime(0.0001, t);
-        ng.gain.linearRampToValueAtTime(0.16, t + 0.01);
-        ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
-        n.connect(lp); lp.connect(ng); ng.connect(bus); ng.connect(send);
-        n.start(t, Math.random()); n.stop(t + 0.6);
-        n.onended = function () { n.disconnect(); lp.disconnect(); ng.disconnect(); };
+        n.loop = true;
+        const bp = ac.createBiquadFilter();
+        bp.type = 'bandpass';
+        bp.Q.value = 0.9;
+        bp.frequency.setValueAtTime(300, t);
+        bp.frequency.exponentialRampToValueAtTime(3500, t + secs);
+        const g = ac.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.06, t + secs * 0.45);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + secs);
+        n.connect(bp); bp.connect(g); g.connect(bus); g.connect(send);
+        n.start(t);
+        n.stop(t + secs + 0.05);
+        n.onended = function () { n.disconnect(); bp.disconnect(); g.disconnect(); };
       },
+
       swell: function (secs) {
         if (dead || !running()) return;
         const t = ac.currentTime;
@@ -359,8 +472,58 @@
         g.gain.exponentialRampToValueAtTime(0.05, t + secs * 0.8);
         g.gain.exponentialRampToValueAtTime(0.0001, t + secs * 1.2);
         n.connect(bp); bp.connect(g); g.connect(bus); g.connect(send);
-        n.start(t); n.stop(t + secs * 1.25);
+        n.start(t);
+        n.stop(t + secs * 1.25);
         n.onended = function () { n.disconnect(); bp.disconnect(); g.disconnect(); };
+      },
+
+      /* Reverse-swell that builds, then is cut dead, right before the strike */
+      riseIn: function (secs) {
+        if (dead || !running()) return;
+        const t = ac.currentTime;
+
+        const n = ac.createBufferSource();
+        n.buffer = noiseBuf;
+        n.loop = true;
+        const bp = ac.createBiquadFilter();
+        bp.type = 'bandpass';
+        bp.Q.value = 1.4;
+        bp.frequency.setValueAtTime(180, t);
+        bp.frequency.exponentialRampToValueAtTime(7000, t + secs);
+        const g = ac.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.11, t + secs);
+        g.gain.setValueAtTime(0.0001, t + secs + 0.004);
+        n.connect(bp); bp.connect(g); g.connect(bus); g.connect(send);
+        n.start(t);
+        n.stop(t + secs + 0.05);
+        n.onended = function () { n.disconnect(); bp.disconnect(); g.disconnect(); };
+
+        const o = ac.createOscillator();
+        o.type = 'sawtooth';
+        o.frequency.setValueAtTime(73.42, t);
+        o.frequency.exponentialRampToValueAtTime(293.66, t + secs);
+        const lp = ac.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.setValueAtTime(400, t);
+        lp.frequency.exponentialRampToValueAtTime(2500, t + secs);
+        const og = ac.createGain();
+        og.gain.setValueAtTime(0.0001, t);
+        og.gain.exponentialRampToValueAtTime(0.035, t + secs);
+        og.gain.setValueAtTime(0.0001, t + secs + 0.004);
+        o.connect(lp); lp.connect(og); og.connect(bus);
+        o.start(t);
+        o.stop(t + secs + 0.05);
+        o.onended = function () { o.disconnect(); lp.disconnect(); og.disconnect(); };
+      },
+
+      /* The strike: a short "ta" hit, then a heavier "DUM" with a resonant tail */
+      boom: function () {
+        if (dead || !running()) return;
+        const t = ac.currentTime + 0.01;
+        hit(t, 0.7, 118, 44, 1.6, false);
+        hit(t + 0.42, 1, 92, 33, 3.4, true);
+        api.chime(293.66, 0.9, 0.43);
       },
 
       /* Abrupt silence (Scene 2 freeze) */
@@ -368,7 +531,7 @@
         const t = ac.currentTime;
         bus.gain.cancelScheduledValues(t);
         bus.gain.setTargetAtTime(0, t, 0.006);
-        sparkleRate = 0; tickRate = 0;
+        sparkleRate = 0; tickRate = 0; pulseRate = 0;
         api.setRiser(0);
         ramp(riseGain.gain, 0, 0.01);
         ramp(rainGain.gain, 0, 0.01);
@@ -376,7 +539,7 @@
       },
       restore: function (secs) { ramp(bus.gain, 1, secs); },
       fadeOut: function (secs) {
-        sparkleRate = 0; tickRate = 0;
+        sparkleRate = 0; tickRate = 0; pulseRate = 0;
         ramp(droneGain.gain, 0, secs);
         ramp(rainGain.gain, 0, secs);
         ramp(riseGain.gain, 0, secs);
@@ -740,43 +903,46 @@
     });
     streamWrap.append(arcsSvg, streamOl);
 
+    // Typed answer
+    const total = STREAM.length;
+    const distinctN = new Set(STREAM).size;
+    const repeatsN = total - distinctN;
+    const ANSWER_WORDS = { 5: 'five' };      // accepted alongside the digit
+
     const form = el('form', 'a1-form');
     form.noValidate = true;
-    const fieldset = el('fieldset');
-    const legend = el('legend', 'a1-q', COPY.s3q);
-    const opts = el('div', 'a1-opts');
-    const OPTIONS = [
-      { id: 'every_arrival', label: 'Every arrival' },
-      { id: 'different_elements', label: 'Only different elements' }
-    ];
-    const optLabels = OPTIONS.map(function (o) {
-      const label = el('label', 'a1-opt');
-      const input = document.createElement('input');
-      input.type = 'radio';
-      input.name = 'a1-interpretation';
-      input.value = o.id;
-      label.append(input, el('span', null, o.label));
-      opts.appendChild(label);
-      return label;
-    });
-    fieldset.append(legend, opts);
+    const qLabel = el('label', 'a1-q', COPY.s3q);
+    qLabel.htmlFor = 'a1-answer';
+    const answerWrap = el('div', 'a1-answer');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.id = 'a1-answer';
+    input.className = 'a1-input';
+    input.setAttribute('inputmode', 'numeric');
+    input.setAttribute('enterkeyhint', 'go');
+    input.setAttribute('autocomplete', 'off');
+    input.setAttribute('autocapitalize', 'off');
+    input.setAttribute('aria-describedby', 'a1-feedback');
+    input.spellcheck = false;
+    input.maxLength = 12;
+    answerWrap.appendChild(input);
+    const feedback = el('p', 'a1-feedback');
+    feedback.id = 'a1-feedback';
+    feedback.setAttribute('aria-live', 'polite');
     const submitBtn = el('button', 'a1-btn', 'SUBMIT');
     submitBtn.type = 'submit';
     submitBtn.disabled = true;
-    form.append(fieldset, submitBtn);
+    form.append(qLabel, answerWrap, feedback, submitBtn);
     const formSlide = slide(form);
 
     const result = el('div');
     result.style.cssText = 'display:flex;flex-direction:column;align-items:center;width:100%';
     const picked = el('p', 'a1-picked a1-fade');
     const counts = el('dl', 'a1-counts');
-    const total = STREAM.length;
-    const distinctN = new Set(STREAM).size;
-    const repeatsN = total - distinctN;
     const COUNT_DEFS = [
-      { key: 'every_arrival', n: total, label: 'Arrivals' },
-      { key: 'different_elements', n: distinctN, label: 'Distinct elements' },
-      { key: null, n: repeatsN, label: 'Repeated arrivals' }
+      { n: total, label: 'Arrivals' },
+      { n: distinctN, label: 'Distinct elements' },
+      { n: repeatsN, label: 'Repeated arrivals' }
     ];
     const countEls = COUNT_DEFS.map(function (d) {
       const box = el('div', 'a1-count a1-fade');
@@ -994,9 +1160,11 @@
       statusEl.classList.add('is-off');
       await sleep(2000);                // held silence
 
+      snd.restore(0.1);                 // everything else is still at zero...
+      snd.beat();                       // ...except one heartbeat in the stillness
+      await sleep(1100);
       snd.setMood('calm', 5);
       snd.setDrone(0.75, 4);
-      snd.restore(4);
 
       ctx.announce('The counter has frozen at 1,000,000,000 total arrivals. ' + COPY.s2.join(' '));
       open(s2aSlide);
@@ -1025,6 +1193,7 @@
 
       // Leave Scene 2: fade rain out
       snd.confirm();
+      snd.whoosh(1.8);
       snd.setRain(0, 2.5);
       snd.setSparkle(0);
       snd.setTick(0, 300);
@@ -1085,6 +1254,11 @@
       arcsSvg.classList.add('is-on');
     }
 
+    function isRight(raw) {
+      const s = String(raw).trim().toLowerCase().replace(/[.\s]+$/, '');
+      return s === String(distinctN) || s === ANSWER_WORDS[distinctN];
+    }
+
     async function scene3() {
       ctx.announce('Scene 3: The question. A small stream of eight arrivals appears, in order: ' + STREAM.join(', ') + '.');
       snd.setMood('calm', 3);
@@ -1099,47 +1273,71 @@
       }
       await sleep(2500);               // let the stream sink in
 
-      ctx.announce(COPY.s3q + ' Choose one interpretation, then submit.');
+      ctx.announce(COPY.s3q + ' Type your answer, then submit.');
       open(formSlide);
       snd.chime(220.0, 0.7);
+      later(function () { input.focus({ preventScroll: true }); }, 350);
 
-      on(form, 'change', function () {
-        const sel = form.querySelector('input:checked');
-        submitBtn.disabled = !sel;
-        optLabels.forEach(function (l) { l.classList.toggle('is-checked', l.querySelector('input').checked); });
-        snd.pop();
+      let attempts = 0;
+
+      on(input, 'input', function () {
+        submitBtn.disabled = !input.value.trim();
+        if (input.classList.contains('is-wrong')) {
+          input.classList.remove('is-wrong');
+          input.removeAttribute('aria-invalid');
+          feedback.classList.remove('is-wrong');
+          feedback.textContent = '';
+        }
+        snd.tap();
       });
 
-      const choice = await new Promise(function (resolve) {
+      await new Promise(function (resolve) {
         on(form, 'submit', function (e) {
           e.preventDefault();
-          const sel = form.querySelector('input:checked');
-          if (!sel || submitBtn.disabled) return;
-          submitBtn.disabled = true;
-          fieldset.disabled = true;
-          resolve(sel.value);
+          const v = input.value.trim();
+          if (!v) return;
+
+          if (isRight(v)) {
+            input.readOnly = true;
+            submitBtn.disabled = true;
+            input.classList.add('is-right');
+            feedback.classList.add('is-right');
+            feedback.textContent = 'Yes.';
+            snd.success();
+            resolve();
+            return;
+          }
+
+          // Wrong answer: shake (or, under reduced motion, the border + message do the work)
+          attempts++;
+          snd.wrong();
+          answerWrap.classList.remove('is-shake');
+          void answerWrap.offsetWidth;
+          answerWrap.classList.add('is-shake');
+          later(function () { answerWrap.classList.remove('is-shake'); }, 600);
+          input.classList.add('is-wrong');
+          input.setAttribute('aria-invalid', 'true');
+          feedback.classList.add('is-wrong');
+          feedback.textContent = attempts >= 3
+            ? 'Not quite. Hint: count each different letter only once.'
+            : 'Not quite. Look at the stream again.';
+          input.focus({ preventScroll: true });
+          input.select();
         });
       });
 
+      await sleep(1500);               // let the "Yes." land
+
       // Reveal
-      snd.confirm();
       close(formSlide);
       await sleep(FADE());
 
       encodeStream();
       await sleep(1200);
 
-      const pickedText = choice === 'every_arrival'
-        ? 'Counting every arrival gives ' + total + '.'
-        : 'Counting only different elements gives ' + distinctN + '.';
+      const pickedText = 'There are ' + distinctN + ' distinct elements among ' + total + ' arrivals.';
       picked.textContent = pickedText;
-      countEls.forEach(function (c) {
-        if (c.def.key === choice) {
-          c.box.classList.add('is-mine');
-          c.dt.appendChild(document.createTextNode(' '));
-          c.dt.appendChild(el('span', 'a1-mine', '\u00B7 your count'));
-        }
-      });
+      countEls[1].box.classList.add('is-answer');
 
       open(resultSlide);
       open(picked);
@@ -1151,7 +1349,7 @@
         await sleep(1200);
       }
 
-      ctx.announce(pickedText + ' There are ' + total + ' arrivals, ' + distinctN +
+      ctx.announce('Correct. ' + pickedText + ' There are ' + total + ' arrivals, ' + distinctN +
         ' distinct elements and ' + repeatsN + ' repeated arrivals. ' + COPY.s3expl.join(' '));
       await sleep(1000);
       for (let i = 0; i < explEls.length; i++) {
@@ -1177,6 +1375,7 @@
       rain.setSpeed(0.8);
       rain.start();
 
+      snd.whoosh(2.4);
       snd.setMood('warm', 5);
       snd.setDrone(0.85, 5);
       snd.setRain(0.3, 4);
@@ -1200,6 +1399,7 @@
 
       ctx.announce(COPY.s4challenge + ' ' + COPY.s4support);
       open(chSlide);
+      snd.setPulse(0.85);              // a slow heartbeat begins under the question
       snd.swell(2.6);
       snd.chime(293.66, 1, 1.8);
       snd.chime(440.0, 0.8, 1.9);
@@ -1226,6 +1426,7 @@
       snd.setRain(0, 9);
       snd.setSparkle(0);
       snd.setMood('low', 10);
+      snd.setDrone(0.3, 3);
       const slowing = tween(9000, function (p) {
         rain.setSpeed(0.8 * (1 - p) + 0.03 * p);
         rain.setDensity(0.4 * (1 - p) + 0.2 * p);
@@ -1234,18 +1435,26 @@
       close(memCSlide);
       s4Slides.forEach(close);
       close(formalSlide);
-      await sleep(FADE() + 3500);       // the central question stands alone
+      await sleep(FADE() + 3500);       // the central question stands alone, heartbeat still going
 
+      // The breath before the strike: heartbeat stops, drone drops away, a swell builds
+      snd.setPulse(0);
+      snd.setDrone(0, 1.4);
       close(supSlide);
       close(chSlide);
-      await sleep(FADE() + 500);
+      open(closeSlide);                 // makes room; the line itself is still invisible
+      const lead = FADE() + 1400;
+      snd.riseIn(lead / 1000);
+      await sleep(lead);
 
+      // The strike: the line snaps in exactly on the hit
       ctx.announce(COPY.closing);
-      open(closeSlide);
+      close1.classList.add('a1-hit');
       open(close1);
-      snd.impact();
-      snd.chime(146.83, 1, 0.15);
-      await sleep(FADE() + 4500);
+      snd.boom();
+      await sleep(900);
+      snd.setDrone(0.45, 1.5);
+      await sleep(FADE() + 3600);
       await slowing;
 
       snd.fadeOut(6);

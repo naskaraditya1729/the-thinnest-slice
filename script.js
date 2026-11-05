@@ -24,6 +24,13 @@
      revealToggle(): fades in the small ENABLE SOUND / SOUND ON / SOUND OFF
                      button (bottom right)
    Acts own every node they create and must disconnect them on exit.
+
+   Mobile notes:
+     - Audio is re-resumed on any later gesture (iOS "interrupted" state),
+       and iOS is switched to the "playback" audio session so sound is not
+       silenced by the ringer switch.
+     - The on-screen keyboard height is published as the CSS variable --kb on
+       #app so Acts can keep inputs visible.
    ========================================================================== */
 
 (function () {
@@ -71,14 +78,70 @@
   const wait = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
   const actId = function (index) { return 'act' + (index + 1); };
 
+  /* ---- Viewport / on-screen keyboard ------------------------------------ */
+
+  (function bindViewport() {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    let raf = 0;
+    function sync() {
+      raf = 0;
+      const kb = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+      app.style.setProperty('--kb', (kb > 80 ? kb : 0) + 'px');
+    }
+    function schedule() { if (!raf) raf = requestAnimationFrame(sync); }
+    vv.addEventListener('resize', schedule);
+    vv.addEventListener('scroll', schedule);
+    window.addEventListener('orientationchange', schedule);
+    sync();
+  })();
+
   /* ---- Shared audio engine ---------------------------------------------- */
 
   const audio = (function () {
     const AC = window.AudioContext || window.webkitAudioContext;
     const MASTER_LEVEL = 0.85;
+    const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
     let ac = null, master = null, comp = null;
     let muted = false, suspendedByHidden = false;
     let btn = null;
+    let keepAlive = null, keepAliveWanted = false;
+
+    /* iOS: route Web Audio through the "playback" session so the ringer
+       switch does not silence it. */
+    if (navigator.audioSession) {
+      try { navigator.audioSession.type = 'playback'; } catch (e) { /* ignore */ }
+    }
+
+    function silentWavUrl() {
+      const sr = 8000, n = 2000;
+      const buf = new ArrayBuffer(44 + n * 2);
+      const v = new DataView(buf);
+      const str = function (o, s) { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+      str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+      v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+      v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true);
+      v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, n * 2, true);
+      return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+    }
+
+    /* Older iOS (no navigator.audioSession): a silent looping media element
+       moves the page into the playback audio session. */
+    function startKeepAlive() {
+      if (!IOS || navigator.audioSession) return;
+      try {
+        if (!keepAlive) {
+          keepAlive = new Audio(silentWavUrl());
+          keepAlive.loop = true;
+          keepAlive.preload = 'auto';
+          keepAlive.setAttribute('playsinline', '');
+        }
+        keepAliveWanted = true;
+        const p = keepAlive.play();
+        if (p && p.catch) p.catch(function () {});
+      } catch (e) { /* ignore */ }
+    }
 
     if (AC) {
       try {
@@ -122,31 +185,36 @@
       master.gain.setTargetAtTime(muted ? 0 : MASTER_LEVEL, t, 0.06);
     }
 
-    /* Unlock: browsers only allow audio after a user gesture. */
+    /* Unlock: browsers only allow audio after a user gesture. The listener
+       stays attached so audio can be recovered after a mobile interruption
+       (phone call, app switch, lock screen). */
     const GESTURES = ['pointerdown', 'touchend', 'keydown', 'click'];
     function onGesture(e) {
       if (!ac) return;
       if (btn && e && btn.contains(e.target)) return;   // the toggle handles itself
-      ac.resume().then(function () {
-        if (ac.state === 'running') unbind();
-        updateButton();
-      }).catch(function () {});
-    }
-    function unbind() {
-      GESTURES.forEach(function (t) { window.removeEventListener(t, onGesture, true); });
+      startKeepAlive();
+      if (ac.state !== 'running' && !document.hidden) {
+        ac.resume().then(updateButton).catch(function () {});
+      }
     }
 
     if (ac) {
-      GESTURES.forEach(function (t) { window.addEventListener(t, onGesture, true); });
+      GESTURES.forEach(function (t) { window.addEventListener(t, onGesture, { capture: true, passive: true }); });
       ac.onstatechange = updateButton;
-      ac.resume().then(function () { if (ac.state === 'running') unbind(); updateButton(); }).catch(function () {});
+      ac.resume().then(updateButton).catch(function () {});
 
       document.addEventListener('visibilitychange', function () {
         if (document.hidden) {
+          if (keepAlive) { try { keepAlive.pause(); } catch (e) { /* ignore */ } }
           if (ac.state === 'running') { suspendedByHidden = true; ac.suspend().catch(function () {}); }
-        } else if (suspendedByHidden) {
-          suspendedByHidden = false;
-          ac.resume().catch(function () {});
+        } else {
+          if (keepAlive && keepAliveWanted) { const p = keepAlive.play(); if (p && p.catch) p.catch(function () {}); }
+          if (suspendedByHidden) {
+            suspendedByHidden = false;
+            ac.resume().catch(function () {});
+          } else if (ac.state !== 'running') {
+            ac.resume().catch(function () {});
+          }
         }
       });
     }
@@ -157,6 +225,7 @@
       btn.type = 'button';
       btn.className = 'sound-toggle';
       btn.addEventListener('click', function () {
+        startKeepAlive();
         if (!running()) { ac.resume().then(updateButton).catch(function () {}); return; }
         muted = !muted;
         applyMute();

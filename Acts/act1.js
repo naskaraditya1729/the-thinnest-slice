@@ -49,13 +49,18 @@
     s4challenge: 'Can we estimate the number of distinct elements without remembering them all?',
     s4support: 'Massive data streams. Limited memory. An accurate estimate.',
     closing: 'THE CHALLENGE BEGINS.',
-    gate: 'CLICK OR PRESS ENTER TO CONTINUE'
+    gate: 'CLICK OR PRESS ENTER TO CONTINUE',
+    gateTouch: 'TAP TO CONTINUE'
   };
 
   const STREAM = ['A', 'B', 'A', 'C', 'D', 'B', 'E', 'C'];
   const MILESTONES = [10000, 1000000, 100000000, 1000000000];
   const ARC_H = 56;
   const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  const isTouch = function () {
+    return !!(window.matchMedia && window.matchMedia('(hover: none) and (pointer: coarse)').matches);
+  };
 
   /* ---- Sound design constants ------------------------------------------- */
 
@@ -572,7 +577,9 @@
 
   /* ========================================================================
      Procedural rain renderer (canvas, one draw pass per frame; no per-glyph
-     DOM nodes)
+     DOM nodes). Glyphs are pre-rendered once into an atlas and blitted with
+     drawImage, which is far cheaper than fillText on mobile GPUs/CPUs. An
+     adaptive quality governor thins the rain if frames run slow.
      ====================================================================== */
 
   function createRain(canvas, initiallyReduced) {
@@ -582,6 +589,7 @@
     }
 
     const GLYPHS = Array.from('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{};:,.<>/?|~');
+    const GN = GLYPHS.length;
     const MONO = 'ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace';
     const BASE = '#1D512B';
     const HI = '#78B982';
@@ -592,8 +600,41 @@
     let rafId = 0, last = 0, wantRunning = false;
     let reduced = !!initiallyReduced;
 
-    const rg = function () { return GLYPHS[(Math.random() * GLYPHS.length) | 0]; };
-    const effDensity = function () { return reduced ? density * 0.4 : density; };
+    // glyph atlas
+    let atlas = null, atlasKey = '', cellW = 0, cellH = 0, dw = 0, dh = 0;
+
+    // adaptive quality
+    let quality = 1, ema = 1 / 60, lastAdjust = 0;
+
+    const rg = function () { return (Math.random() * GN) | 0; };
+    const effDensity = function () { return (reduced ? density * 0.4 : density) * quality; };
+
+    function buildAtlas() {
+      const key = fs + '|' + dpr + '|' + cw + '|' + lh;
+      if (key === atlasKey && atlas) return;
+      atlasKey = key;
+      cellW = Math.ceil(cw * dpr);
+      cellH = Math.ceil(lh * dpr);
+      dw = cellW / dpr;
+      dh = cellH / dpr;
+      try {
+        const a = document.createElement('canvas');
+        a.width = cellW * GN;
+        a.height = cellH * 2;
+        const x = a.getContext('2d');
+        if (!x) { atlas = null; return; }
+        x.setTransform(dpr, 0, 0, dpr, 0, 0);
+        x.font = fs + 'px ' + MONO;
+        x.textBaseline = 'top';
+        [BASE, HI].forEach(function (color, r) {
+          x.fillStyle = color;
+          for (let i = 0; i < GN; i++) x.fillText(GLYPHS[i], i * dw, r * dh);
+        });
+        atlas = a;
+      } catch (e) {
+        atlas = null;
+      }
+    }
 
     function spawn(c, initial) {
       c.state = 'run';
@@ -631,6 +672,7 @@
       lh = Math.round(fs * 1.2);
       cw = Math.round(fs * 0.95);
       rows = Math.ceil(h / lh) + 1;
+      buildAtlas();
       if (widthChanged || !cols.length) build();
       draw();
     }
@@ -664,8 +706,11 @@
       g.globalAlpha = 1;
       g.fillStyle = '#000000';
       g.fillRect(0, 0, w, h);
-      g.font = fs + 'px ' + MONO;
-      g.textBaseline = 'top';
+      const useAtlas = !!atlas;
+      if (!useAtlas) {
+        g.font = fs + 'px ' + MONO;
+        g.textBaseline = 'top';
+      }
       let fill = '';
       for (let k = 0; k < cols.length; k++) {
         const c = cols[k];
@@ -677,14 +722,19 @@
           const ch = c.chars[i];
           const t = i / c.len;
           let a = Math.pow(1 - t, 1.5) * c.bright;
-          let col = BASE;
-          if (i === 0) { col = HI; a = c.hot ? 1 : 0.2 + 0.55 * c.bright; }
-          else if (i === 1 && c.hot) { col = HI; a = 0.55; }
-          else if (((row * 7 + ch.charCodeAt(0) + (c.x | 0)) % 29) === 0) { col = HI; a = 0.1 + 0.5 * (1 - t); }
+          let hi = false;
+          if (i === 0) { hi = true; a = c.hot ? 1 : 0.2 + 0.55 * c.bright; }
+          else if (i === 1 && c.hot) { hi = true; a = 0.55; }
+          else if (((row * 7 + ch + (c.x | 0)) % 29) === 0) { hi = true; a = 0.1 + 0.5 * (1 - t); }
           if (a < 0.04) continue;
-          if (col !== fill) { g.fillStyle = col; fill = col; }
           g.globalAlpha = a > 1 ? 1 : a;
-          g.fillText(ch, c.x, row * lh);
+          if (useAtlas) {
+            g.drawImage(atlas, ch * cellW, hi ? cellH : 0, cellW, cellH, c.x, row * lh, dw, dh);
+          } else {
+            const col = hi ? HI : BASE;
+            if (col !== fill) { g.fillStyle = col; fill = col; }
+            g.fillText(GLYPHS[ch], c.x, row * lh);
+          }
         }
       }
       g.globalAlpha = 1;
@@ -694,6 +744,16 @@
       rafId = requestAnimationFrame(loop);
       const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
       last = now;
+
+      // Adaptive quality: if frames stay slow, thin the rain (never thickens again)
+      if (!reduced && dt < 0.09) {
+        ema = ema * 0.9 + dt * 0.1;
+        if (ema > 0.027 && quality > 0.5 && now - lastAdjust > 2000) {
+          quality = Math.max(0.5, quality - 0.12);
+          lastAdjust = now;
+        }
+      }
+
       update(dt);
       draw();
     }
@@ -708,7 +768,11 @@
       start() {
         wantRunning = true;
         if (reduced) { draw(); return; }
-        if (!rafId) { last = performance.now(); rafId = requestAnimationFrame(loop); }
+        if (!rafId) {
+          last = performance.now();
+          lastAdjust = last;
+          rafId = requestAnimationFrame(loop);
+        }
       },
       stop() { wantRunning = false; stopLoop(); },
       resize: resize,
@@ -723,9 +787,9 @@
         reduced = !!v;
         build();
         draw();
-        if (was && !reduced) { last = performance.now(); rafId = requestAnimationFrame(loop); }
+        if (was && !reduced) { last = performance.now(); lastAdjust = last; rafId = requestAnimationFrame(loop); }
       },
-      destroy() { wantRunning = false; stopLoop(); cols = []; }
+      destroy() { wantRunning = false; stopLoop(); cols = []; atlas = null; }
     };
   }
 
@@ -919,8 +983,10 @@
     input.id = 'a1-answer';
     input.className = 'a1-input';
     input.setAttribute('inputmode', 'numeric');
+    input.setAttribute('pattern', '[0-9]*');
     input.setAttribute('enterkeyhint', 'go');
     input.setAttribute('autocomplete', 'off');
+    input.setAttribute('autocorrect', 'off');
     input.setAttribute('autocapitalize', 'off');
     input.setAttribute('aria-describedby', 'a1-feedback');
     input.spellcheck = false;
@@ -1005,13 +1071,14 @@
     // Continue cue (visual) + live-region announcement (assistive tech)
     const hint = el('div', 'a1-hint');
     hint.setAttribute('aria-hidden', 'true');
-    hint.appendChild(el('span', null, COPY.gate));
+    const hintSpan = el('span', null, COPY.gate);
+    hint.appendChild(hintSpan);
     const gateLive = el('p', 'sr-only');
     gateLive.setAttribute('role', 'status');
 
     root.append(canvas, veil, secA, secB, secC, hint, gateLive);
 
-    /* ---- Click / key gate: a screen that waits for the visitor ---- */
+    /* ---- Click / tap / key gate: a screen that waits for the visitor ---- */
 
     function gate() {
       return new Promise(function (resolve) {
@@ -1021,8 +1088,10 @@
         sleep(1200).then(function () {
           if (done) return;
           armed = true;
+          const touch = isTouch();
+          hintSpan.textContent = touch ? COPY.gateTouch : COPY.gate;
           hint.classList.add('is-on');
-          gateLive.textContent = 'Click or press Enter to continue.';
+          gateLive.textContent = touch ? 'Tap to continue.' : 'Click or press Enter to continue.';
         });
 
         function finish() {
@@ -1067,6 +1136,17 @@
       rafs.add(resizeRaf);
     });
     undo.push(motion.subscribe(function (r) { rain.setReduced(r); }));
+
+    /* ---- On-screen keyboard: keep the answer field and button visible ---- */
+
+    function keepFormVisible() {
+      if (document.activeElement !== input) return;
+      try { form.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch (e) { /* ignore */ }
+    }
+    on(input, 'focus', function () { later(keepFormVisible, 320); });
+    if (window.visualViewport) {
+      on(window.visualViewport, 'resize', function () { later(keepFormVisible, 60); });
+    }
 
     /* ---- Counter ---- */
 
@@ -1174,7 +1254,7 @@
       snd.chime(220.0, 0.9);
       await sleep(FADE() + 1400);
 
-      await gate();                     // click to continue
+      await gate();                     // click / tap to continue
 
       open(memASlide);
       open(memA);
@@ -1186,6 +1266,7 @@
       snd.chime(220.0, 0.8);
       snd.chime(329.63, 0.6, 0.12);
       findBtn.focus({ preventScroll: true });
+      bring(qSlide);
 
       await new Promise(function (resolve) {
         on(findBtn, 'click', function () { findBtn.disabled = true; resolve(); }, { once: true });
@@ -1276,7 +1357,9 @@
       ctx.announce(COPY.s3q + ' Type your answer, then submit.');
       open(formSlide);
       snd.chime(220.0, 0.7);
-      later(function () { input.focus({ preventScroll: true }); }, 350);
+      // On touch devices the field is not auto-focused: an unprompted keyboard
+      // would cover the stream. The visitor taps the field when ready.
+      if (!isTouch()) later(function () { input.focus({ preventScroll: true }); }, 350);
 
       let attempts = 0;
 
@@ -1303,6 +1386,7 @@
             input.classList.add('is-right');
             feedback.classList.add('is-right');
             feedback.textContent = 'Yes.';
+            input.blur();                 // dismiss the on-screen keyboard
             snd.success();
             resolve();
             return;
@@ -1359,7 +1443,7 @@
         await sleep(FADE() + 2600);
       }
 
-      await gate();                    // click to continue
+      await gate();                    // click / tap to continue
       await hideSec(secB);
       arcsDrawn = false;
     }
@@ -1395,7 +1479,7 @@
       }
       await sleep(800);
 
-      await gate();                    // click to continue
+      await gate();                    // click / tap to continue
 
       ctx.announce(COPY.s4challenge + ' ' + COPY.s4support);
       open(chSlide);
@@ -1420,7 +1504,7 @@
       bring(formalSlide);
       await sleep(3000);
 
-      await gate();                    // click to continue
+      await gate();                    // click / tap to continue
 
       // Closing: slow the rain, remove container and supporting material
       snd.setRain(0, 9);

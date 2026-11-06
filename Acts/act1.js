@@ -58,6 +58,8 @@
   const ARC_H = 56;
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
+  const bufferCache = new WeakMap();   // generated audio buffers, per AudioContext
+
   const isTouch = function () {
     return !!(window.matchMedia && window.matchMedia('(hover: none) and (pointer: coarse)').matches);
   };
@@ -104,18 +106,31 @@
     bus.gain.value = 1;
     bus.connect(audio.output);
 
-    /* Reverb (generated impulse response) */
+    /* Generated buffers are built once per AudioContext and reused when the
+       Act is re-entered. */
+    let cache = bufferCache.get(ac);
+    if (!cache) { cache = {}; bufferCache.set(ac, cache); }
+
+    /* Reverb (generated impulse response). The decay envelope is evaluated
+       every 128 samples and interpolated, which keeps this off the critical
+       path on slow phones. */
     function impulse(len, decay) {
       const n = Math.floor(ac.sampleRate * len);
       const b = ac.createBuffer(2, n, ac.sampleRate);
+      const STEP = 128;
       for (let ch = 0; ch < 2; ch++) {
         const d = b.getChannelData(ch);
-        for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, decay);
+        for (let i = 0; i < n; i += STEP) {
+          const e0 = Math.pow(1 - i / n, decay);
+          const e1 = Math.pow(Math.max(0, 1 - (i + STEP) / n), decay);
+          const end = Math.min(n, i + STEP);
+          for (let j = i; j < end; j++) d[j] = (Math.random() * 2 - 1) * (e0 + (e1 - e0) * ((j - i) / STEP));
+        }
       }
       return b;
     }
     const verb = ac.createConvolver();
-    verb.buffer = impulse(3.4, 2.6);
+    verb.buffer = cache.ir || (cache.ir = impulse(3.4, 2.6));
     const verbOut = ac.createGain();
     verbOut.gain.value = 0.7;
     verb.connect(verbOut);
@@ -125,17 +140,25 @@
     send.connect(verb);
 
     /* Shared noise buffer */
-    const noiseBuf = (function () {
+    const noiseBuf = cache.noise || (cache.noise = (function () {
       const n = ac.sampleRate * 2;
       const b = ac.createBuffer(1, n, ac.sampleRate);
       const d = b.getChannelData(0);
       for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
       return b;
-    })();
+    })());
 
+    /* Smooth parameter glide. The value is anchored at "now" first, so a new
+       target never causes a jump (older Safari / Firefox need the anchor). */
     const ramp = function (param, v, secs) {
       const t = ac.currentTime;
-      param.cancelScheduledValues(t);
+      if (param.cancelAndHoldAtTime) {
+        param.cancelAndHoldAtTime(t);
+      } else {
+        const cur = param.value;
+        param.cancelScheduledValues(t);
+        param.setValueAtTime(cur, t);
+      }
       param.setTargetAtTime(v, t, Math.max(0.005, secs / 3));
     };
 
@@ -218,32 +241,44 @@
 
     longOscs.forEach(function (o) { o.start(); });
 
-    /* Event loops (counter ticks, glyph sparkle, heartbeat) */
+    /* Event lanes (counter ticks, glyph sparkle, heartbeat). A short
+       look-ahead scheduler places every event on the audio clock, so the
+       spacing stays even when the main thread is busy with layout or paint. */
     let dead = false;
     let sparkleRate = 0, tickRate = 0, tickHz = 300, pulseRate = 0;
-    const loopTimers = new Set();
+    let voices = 0;
+    const LOOK_AHEAD = 0.16, SCHED_MS = 25, MAX_AMBIENT = 26;
+    const BELL = [[1, 1], [2.76, 0.22], [5.4, 0.08]];
+    const SINGLE = [[1, 1]];
+    const lanes = [];
+    let schedTimer = 0;
 
-    function loop(getRate, fn, steady) {
-      (function step() {
-        if (dead) return;
-        const r = getRate();
-        const jitter = steady ? 1 : (0.6 + Math.random() * 0.8);
-        const waitMs = r > 0 ? (1000 / r) * jitter : 120;
-        const id = setTimeout(function () {
-          loopTimers.delete(id);
-          if (dead) return;
-          if (r > 0 && running()) fn();
-          step();
-        }, waitMs);
-        loopTimers.add(id);
-      })();
+    function lane(getRate, fn, steady) { lanes.push({ rate: getRate, fn: fn, steady: !!steady, next: 0 }); }
+    function gapOf(L, base) { return L.steady ? base : base * (0.6 + Math.random() * 0.8); }
+
+    function schedule() {
+      schedTimer = 0;
+      if (dead) return;
+      if (running()) {
+        const now = ac.currentTime, horizon = now + LOOK_AHEAD;
+        for (let k = 0; k < lanes.length; k++) {
+          const L = lanes[k];
+          const r = L.rate();
+          if (!(r > 0)) { L.next = 0; continue; }
+          const base = 1 / r;
+          if (L.next < now) L.next = now + gapOf(L, base);   // (re)seed; never burst after a stall
+          while (L.next < horizon) { L.fn(L.next); L.next += gapOf(L, base); }
+        }
+      }
+      schedTimer = setTimeout(schedule, SCHED_MS);
     }
 
-    /* One-shot voice */
+    /* One-shot voice. o.at = absolute audio time, o.delay = seconds from now. */
     function tone(f, o) {
       if (dead || !running()) return;
       o = o || {};
-      const t = ac.currentTime + (o.delay || 0);
+      if (o.amb && voices >= MAX_AMBIENT) return;
+      const t = o.at != null ? Math.max(o.at, ac.currentTime) : ac.currentTime + (o.delay || 0);
       const att = o.att == null ? 0.01 : o.att;
       const dur = o.dur || 1;
       const g = ac.createGain();
@@ -252,29 +287,36 @@
       g.gain.exponentialRampToValueAtTime(0.0001, t + att + dur);
       g.connect(bus);
       if (o.wet !== false) g.connect(send);
-      const parts = o.bell ? [[1, 1], [2.76, 0.22], [5.4, 0.08]] : [[1, 1]];
-      parts.forEach(function (p, i) {
+      const parts = o.bell ? BELL : SINGLE;
+      let left = parts.length;
+      voices++;
+      parts.forEach(function (p) {
         const osc = ac.createOscillator();
         osc.type = o.type || 'sine';
         osc.frequency.value = f * p[0];
-        const pg = ac.createGain();
-        pg.gain.value = p[1];
-        osc.connect(pg);
-        pg.connect(g);
+        let pg = null;
+        if (p[1] !== 1) {
+          pg = ac.createGain();
+          pg.gain.value = p[1];
+          osc.connect(pg);
+          pg.connect(g);
+        } else {
+          osc.connect(g);
+        }
         osc.start(t);
         osc.stop(t + att + dur + 0.05);
         osc.onended = function () {
           osc.disconnect();
-          pg.disconnect();
-          if (i === parts.length - 1) g.disconnect();
+          if (pg) pg.disconnect();
+          if (--left === 0) { g.disconnect(); voices--; }
         };
       });
     }
 
     /* Low heartbeat-style thump (sub sine + audible harmonic) */
-    function thump(gain, delay) {
+    function thump(gain, at) {
       if (dead || !running()) return;
-      const t = ac.currentTime + (delay || 0);
+      const t = at == null ? ac.currentTime : Math.max(at, ac.currentTime);
       [['sine', 70, 42, 1], ['triangle', 140, 84, 0.35]].forEach(function (v) {
         const o = ac.createOscillator();
         o.type = v[0];
@@ -367,17 +409,18 @@
       }
     }
 
-    loop(function () { return sparkleRate; }, function () {
+    lane(function () { return sparkleRate; }, function (t) {
       const f = PENT_HI[(Math.random() * PENT_HI.length) | 0];
-      tone(f, { gain: SND.sparkle * (0.5 + Math.random()), att: 0.004, dur: 0.5 + Math.random() * 0.7 });
+      tone(f, { at: t, amb: true, gain: SND.sparkle * (0.5 + Math.random()), att: 0.004, dur: 0.5 + Math.random() * 0.7 });
     });
-    loop(function () { return tickRate; }, function () {
-      tone(tickHz * (1 + Math.random() * 0.02), { type: 'triangle', gain: SND.tick, att: 0.002, dur: 0.03, wet: false });
+    lane(function () { return tickRate; }, function (t) {
+      tone(tickHz * (1 + Math.random() * 0.02), { at: t, amb: true, type: 'triangle', gain: SND.tick, att: 0.002, dur: 0.03, wet: false });
     });
-    loop(function () { return pulseRate; }, function () {
-      thump(SND.pulse);
-      thump(SND.pulse * 0.6, 0.24);
+    lane(function () { return pulseRate; }, function (t) {
+      thump(SND.pulse, t);
+      thump(SND.pulse * 0.6, t + 0.24);
     }, true);
+    schedTimer = setTimeout(schedule, SCHED_MS);
 
     /* ---- API ---- */
 
@@ -435,7 +478,7 @@
       },
       beat: function () {            // a single "lub-dub"
         thump(SND.pulse);
-        thump(SND.pulse * 0.6, 0.24);
+        thump(SND.pulse * 0.6, ac.currentTime + 0.24);
       },
 
       /* Filtered-noise sweep between scenes */
@@ -553,8 +596,7 @@
       destroy: function () {
         if (dead) return;
         dead = true;
-        loopTimers.forEach(function (id) { clearTimeout(id); });
-        loopTimers.clear();
+        if (schedTimer) { clearTimeout(schedTimer); schedTimer = 0; }
         const cleanup = function () {
           try { bus.disconnect(); verb.disconnect(); verbOut.disconnect(); send.disconnect(); } catch (e) { /* ignore */ }
         };
@@ -578,8 +620,23 @@
   /* ========================================================================
      Procedural rain renderer (canvas, one draw pass per frame; no per-glyph
      DOM nodes). Glyphs are pre-rendered once into an atlas and blitted with
-     drawImage, which is far cheaper than fillText on mobile GPUs/CPUs. An
-     adaptive quality governor thins the rain if frames run slow.
+     drawImage.
+
+     Adaptive density: the amount of rain is derived from the viewport rather
+     than from a fixed per-column probability.
+       - Glyph size and column pitch scale with the width, so narrow screens
+         get more (slightly tighter) columns.
+       - The number of simultaneously falling streams follows a compromise
+         between "same per pixel" and "same per screen" (width^0.3 below the
+         1440px reference), so a phone is no longer sparse.
+       - When a narrow screen needs more streams than it has columns, a
+         column may carry two streams (same speed, so they never overlap).
+       - New streams are placed with best-candidate sampling, which spreads
+         them evenly across the width: no permanently empty bands and no
+         clusters.
+     Streams, ring buffers and fade tables are pooled, so a frame allocates
+     nothing. A frame-time governor thins (and later restores) the rain, and
+     displays of 100 Hz and above are drawn at half rate.
      ====================================================================== */
 
   function createRain(canvas, initiallyReduced) {
@@ -593,27 +650,41 @@
     const MONO = 'ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace';
     const BASE = '#1D512B';
     const HI = '#78B982';
+    const CAP = 32, MASK = 31;          // trail ring buffer (max trail length is 31)
+    const REF_W = 1440, REF_COLS = 85;  // the desktop the original density was tuned on
+    const SPAWN_TAU = 0.25;             // seconds; how fast missing streams are replaced
 
-    let w = 0, h = 0, dpr = 1, fs = 16, lh = 19, cw = 15, rows = 0;
+    let w = 0, h = 0, dpr = 1, fs = 16, lh = 19, pitch = 15, rows = 0, n = 0, lanes = 1;
     let cols = [];
+    const live = [];
+    const pool = [];
     let density = 0.45, speed = 1, builtDensity = -1;
-    let rafId = 0, last = 0, wantRunning = false;
+    let rafId = 0, last = 0, lastDraw = 0, acc = 0, wantRunning = false;
     let reduced = !!initiallyReduced;
 
     // glyph atlas
     let atlas = null, atlasKey = '', cellW = 0, cellH = 0, dw = 0, dh = 0;
 
-    // adaptive quality
-    let quality = 1, ema = 1 / 60, lastAdjust = 0;
+    // frame governor
+    let quality = 1, rateEma = 1 / 60, lastAdjust = 0, slowAt = 0, halfRate = false;
 
     const rg = function () { return (Math.random() * GN) | 0; };
-    const effDensity = function () { return (reduced ? density * 0.4 : density) * quality; };
+
+    /* Number of streams that should be falling right now. */
+    function targetActive() {
+      const d = reduced ? density * 0.4 : density;
+      const f0 = d * (0.55 + 0.45 * d);                 // the original coverage curve
+      let s = w >= REF_W ? f0 * n : f0 * REF_COLS * Math.pow(w / REF_W, 0.3);
+      s *= Math.min(1, Math.max(0.75, rows / 30));       // short (landscape) screens need less
+      return Math.min(s * 1.1, n * lanes * 0.98) * quality;   // 1.1: streams are replaced slightly after they end
+    }
 
     function buildAtlas() {
-      const key = fs + '|' + dpr + '|' + cw + '|' + lh;
+      const key = fs + '|' + dpr + '|' + lh;
       if (key === atlasKey && atlas) return;
       atlasKey = key;
-      cellW = Math.ceil(cw * dpr);
+      const cellCss = Math.ceil(fs * 0.66);
+      cellW = Math.ceil(cellCss * dpr);
       cellH = Math.ceil(lh * dpr);
       dw = cellW / dpr;
       dh = cellH / dpr;
@@ -636,24 +707,84 @@
       }
     }
 
-    function spawn(c, initial) {
-      c.state = 'run';
-      c.len = 8 + ((Math.random() * 24) | 0);
-      c.speed = 6 + Math.random() * 16;          // rows per second
-      c.bright = 0.5 + Math.random() * 0.5;
-      c.hot = Math.random() < 0.12;
-      c.chars = Array.from({ length: c.len }, rg);
-      c.head = initial ? Math.random() * (rows + c.len) - c.len * 0.3 : -Math.random() * 4;
+    function newest(c) {
+      const a = c.st;
+      return a.length > 1 && a[1].head < a[0].head ? a[1] : a[0];
+    }
+
+    function launch(c, head) {
+      const s = pool.pop() || { col: null, head: 0, len: 0, speed: 0, bright: 1, hot: false, top: 0,
+                                buf: new Uint8Array(CAP), fade: new Float32Array(CAP) };
+      const lead = c.st.length ? c.st[c.st.length - 1] : null;
+      s.col = c;
+      s.len = 8 + ((Math.random() * 24) | 0);
+      s.speed = lead ? lead.speed : 6 + Math.random() * 16;   // rows per second
+      s.bright = 0.5 + Math.random() * 0.5;
+      s.hot = Math.random() < 0.12;
+      s.top = 0;
+      s.head = head;
+      for (let i = 0; i < s.len; i++) {
+        s.buf[i] = rg();
+        s.fade[i] = Math.pow(1 - i / s.len, 1.5) * s.bright;
+      }
+      c.st.push(s);
+      live.push(s);
+      return s;
+    }
+
+    function retire(i) {
+      const s = live[i];
+      const st = s.col.st;
+      st.splice(st.indexOf(s), 1);
+      live[i] = live[live.length - 1];
+      live.pop();
+      s.col = null;
+      if (pool.length < 160) pool.push(s);
+    }
+
+    /* Best-candidate sampling: of a few random free columns, take the one
+       farthest from any occupied column. */
+    function pickColumn(initial) {
+      let best = null, bestScore = -1, found = 0;
+      for (let k = 0; k < 16 && found < 3; k++) {
+        const c = cols[(Math.random() * n) | 0];
+        const m = c.st.length;
+        if (m >= lanes) continue;
+        if (m && !initial) { const nw = newest(c); if (nw.head - nw.len <= 4) continue; }
+        found++;
+        let score;
+        if (m) score = 0.5;
+        else {
+          let dist = 7;
+          for (let o = 1; o <= 6; o++) {
+            const a = cols[c.ci - o], b = cols[c.ci + o];
+            if ((a && a.st.length) || (b && b.st.length)) { dist = o; break; }
+          }
+          score = dist;
+        }
+        score += Math.random() * 0.4;
+        if (score > bestScore) { bestScore = score; best = c; }
+      }
+      return best;
+    }
+
+    function initialHead(s, c) {
+      if (c.st.length < 2) return Math.random() * (rows + s.len) - s.len * 0.3;
+      const o = c.st[0];
+      const below = o.head + s.len + 3 + Math.random() * 8;
+      return below < rows + s.len * 0.5 ? below : o.head - o.len - 3 - Math.random() * 8;
     }
 
     function build() {
-      const n = Math.ceil(w / cw);
+      while (live.length) retire(live.length - 1);
       cols = [];
-      for (let i = 0; i < n; i++) {
-        const c = { x: i * cw, thr: Math.random(), state: 'wait', wait: Math.random() * 3,
-                    len: 0, speed: 0, bright: 1, hot: false, chars: [], head: 0 };
-        if (c.thr <= effDensity()) spawn(c, true);
-        cols.push(c);
+      for (let i = 0; i < n; i++) cols.push({ x: i * pitch, ci: i, st: [] });
+      const A = Math.round(targetActive());
+      for (let k = 0; k < A; k++) {
+        const c = pickColumn(true);
+        if (!c) break;
+        const s = launch(c, 0);
+        s.head = initialHead(s, c);
       }
       builtDensity = density;
     }
@@ -662,42 +793,51 @@
       const rect = canvas.getBoundingClientRect();
       const nw = Math.max(1, Math.round(rect.width));
       const nh = Math.max(1, Math.round(rect.height));
-      const widthChanged = nw !== w;
-      w = nw; h = nh;
-      dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.round(w * dpr);
-      canvas.height = Math.round(h * dpr);
+      const ndpr = Math.min(window.devicePixelRatio || 1, 2);
+      if (nw === w && nh === h && ndpr === dpr && cols.length) return;
+      w = nw; h = nh; dpr = ndpr;
+      const pw = Math.round(w * dpr), ph = Math.round(h * dpr);
+      if (canvas.width !== pw) canvas.width = pw;
+      if (canvas.height !== ph) canvas.height = ph;
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
-      fs = Math.max(13, Math.min(18, Math.round(w / 70)));
+
+      fs = Math.max(11, Math.min(18, Math.round(w / 70)));
       lh = Math.round(fs * 1.2);
-      cw = Math.round(fs * 0.95);
+      const pk = Math.max(0.8, Math.min(0.95, 0.8 + (w - 480) / 520 * 0.15));
+      const np = Math.max(Math.ceil(fs * 0.66) + 1, Math.round(fs * pk));
+      const nn = Math.ceil(w / np);
       rows = Math.ceil(h / lh) + 1;
       buildAtlas();
-      if (widthChanged || !cols.length) build();
+
+      if (!cols.length || np !== pitch || nn !== n) {
+        pitch = np; n = nn;
+        lanes = (w < REF_W && REF_COLS * Math.pow(w / REF_W, 0.3) > n * 1.02) ? 2 : 1;
+        build();
+      }
       draw();
     }
 
     function update(dt) {
-      const dens = effDensity();
-      for (let k = 0; k < cols.length; k++) {
-        const c = cols[k];
-        if (c.state === 'wait') {
-          c.wait -= dt;
-          if (c.wait <= 0) {
-            if (c.thr <= dens) spawn(c, false);
-            else c.wait = 0.4 + Math.random() * 0.6;
-          }
-          continue;
-        }
-        const prev = Math.floor(c.head);
-        c.head += c.speed * speed * dt;
-        const cur = Math.floor(c.head);
-        for (let r = prev; r < cur; r++) c.chars.unshift(rg());
-        if (c.chars.length > c.len) c.chars.length = c.len;
-        if (Math.random() < dt * 3) c.chars[(Math.random() * c.chars.length) | 0] = rg();
-        if (c.head - c.len > rows + 1) {
-          c.state = 'wait';
-          c.wait = Math.random() * (0.2 + 6 * (1 - dens));
+      const k = speed * dt;
+      for (let i = live.length - 1; i >= 0; i--) {
+        const s = live[i];
+        const prev = Math.floor(s.head);
+        s.head += s.speed * k;
+        const steps = Math.min(Math.floor(s.head) - prev, CAP);
+        for (let r = 0; r < steps; r++) { s.top = (s.top - 1) & MASK; s.buf[s.top] = rg(); }
+        if (Math.random() < dt * 3) s.buf[(s.top + ((Math.random() * s.len) | 0)) & MASK] = rg();
+        if (s.head - s.len > rows + 1) retire(i);
+      }
+
+      const deficit = targetActive() - live.length;
+      if (deficit > 0) {
+        const want = deficit * dt / SPAWN_TAU;
+        let cnt = Math.floor(want);
+        if (Math.random() < want - cnt) cnt++;
+        while (cnt-- > 0) {
+          const c = pickColumn(false);
+          if (!c) break;
+          launch(c, -Math.random() * 4);
         }
       }
     }
@@ -712,20 +852,20 @@
         g.textBaseline = 'top';
       }
       let fill = '';
-      for (let k = 0; k < cols.length; k++) {
-        const c = cols[k];
-        if (c.state !== 'run') continue;
-        const hr = Math.floor(c.head);
-        for (let i = 0; i < c.chars.length; i++) {
+      for (let k = 0; k < live.length; k++) {
+        const s = live[k];
+        const c = s.col;
+        const hr = Math.floor(s.head);
+        const i0 = Math.max(0, hr - (rows - 1));
+        const i1 = Math.min(s.len - 1, hr);
+        for (let i = i0; i <= i1; i++) {
           const row = hr - i;
-          if (row < 0 || row >= rows) continue;
-          const ch = c.chars[i];
-          const t = i / c.len;
-          let a = Math.pow(1 - t, 1.5) * c.bright;
+          const ch = s.buf[(s.top + i) & MASK];
+          let a = s.fade[i];
           let hi = false;
-          if (i === 0) { hi = true; a = c.hot ? 1 : 0.2 + 0.55 * c.bright; }
-          else if (i === 1 && c.hot) { hi = true; a = 0.55; }
-          else if (((row * 7 + ch + (c.x | 0)) % 29) === 0) { hi = true; a = 0.1 + 0.5 * (1 - t); }
+          if (i === 0) { hi = true; a = s.hot ? 1 : 0.2 + 0.55 * s.bright; }
+          else if (i === 1 && s.hot) { hi = true; a = 0.55; }
+          else if (((row * 7 + ch + c.ci * 5) % 29) === 0) { hi = true; a = 0.1 + 0.5 * (1 - i / s.len); }
           if (a < 0.04) continue;
           g.globalAlpha = a > 1 ? 1 : a;
           if (useAtlas) {
@@ -742,20 +882,40 @@
 
     function loop(now) {
       rafId = requestAnimationFrame(loop);
-      const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
+      const raw = Math.min(0.1, Math.max(0, (now - last) / 1000));
       last = now;
+      acc += raw;
 
-      // Adaptive quality: if frames stay slow, thin the rain (never thickens again)
-      if (!reduced && dt < 0.09) {
-        ema = ema * 0.9 + dt * 0.1;
-        if (ema > 0.027 && quality > 0.5 && now - lastAdjust > 2000) {
-          quality = Math.max(0.5, quality - 0.12);
-          lastAdjust = now;
+      if (raw > 0 && raw < 0.09) {
+        rateEma = rateEma * 0.9 + raw * 0.1;
+        if (rateEma < 0.0105) halfRate = true;          // 100 Hz+ display: draw every other frame
+        else if (rateEma > 0.0135) halfRate = false;
+        if (rateEma > 0.0185) slowAt = now;
+        if (!reduced) {
+          if (rateEma > 0.027 && quality > 0.5 && now - lastAdjust > 2000) {
+            quality = Math.max(0.5, quality - 0.12);      // frames are slow: thin the rain
+            lastAdjust = now;
+          } else if (quality < 1 && now - slowAt > 8000 && now - lastAdjust > 4000) {
+            quality = Math.min(1, quality + 0.06);        // sustained smoothness: thicken again
+            lastAdjust = now;
+          }
         }
       }
 
+      if (halfRate && now - lastDraw < 12.5) return;
+      lastDraw = now;
+      const dt = Math.min(0.1, acc);
+      acc = 0;
       update(dt);
       draw();
+    }
+
+    function startLoop() {
+      last = performance.now();
+      lastDraw = 0;
+      acc = 0;
+      slowAt = lastAdjust = last;
+      rafId = requestAnimationFrame(loop);
     }
 
     function stopLoop() {
@@ -768,11 +928,7 @@
       start() {
         wantRunning = true;
         if (reduced) { draw(); return; }
-        if (!rafId) {
-          last = performance.now();
-          lastAdjust = last;
-          rafId = requestAnimationFrame(loop);
-        }
+        if (!rafId) startLoop();
       },
       stop() { wantRunning = false; stopLoop(); },
       resize: resize,
@@ -787,9 +943,13 @@
         reduced = !!v;
         build();
         draw();
-        if (was && !reduced) { last = performance.now(); lastAdjust = last; rafId = requestAnimationFrame(loop); }
+        if (was && !reduced) startLoop();
       },
-      destroy() { wantRunning = false; stopLoop(); cols = []; atlas = null; }
+      destroy() {
+        wantRunning = false; stopLoop();
+        while (live.length) retire(live.length - 1);
+        cols = []; pool.length = 0; atlas = null;
+      }
     };
   }
 
@@ -803,31 +963,40 @@
     const fmt = new Intl.NumberFormat('en-US');
     const snd = createSound(ctx.audio);
 
-    const timers = new Set();
     const rafs = new Set();
     const undo = [];
 
     const FADE = function () { return motion.reduced() ? 0 : 1200; };
 
-    /* ---- Lifecycle-safe helpers ---- */
+    /* ---- Lifecycle-safe helpers ----
+       All Act timing runs on a pausable clock: while the tab is hidden the
+       timeline freezes (the audio engine suspends at the same moment), so
+       sound and visuals resume exactly where they left off. */
 
-    const sleep = function (ms) {
-      return new Promise(function (resolve) {
-        const id = setTimeout(function () { timers.delete(id); resolve(); }, ms);
-        timers.add(id);
-      });
+    const pending = new Set();
+    let pausedAt = -1, pausedTotal = 0;
+
+    const vnow = function () { return (pausedAt >= 0 ? pausedAt : performance.now()) - pausedTotal; };
+    const arm = function (t) {
+      t.started = performance.now();
+      t.handle = setTimeout(function () { pending.delete(t); t.fn(); }, t.remaining);
     };
     const later = function (fn, ms) {
-      const id = setTimeout(function () { timers.delete(id); fn(); }, ms);
-      timers.add(id);
+      const t = { fn: fn, remaining: Math.max(0, ms), started: 0, handle: 0 };
+      pending.add(t);
+      if (pausedAt < 0) arm(t);
+    };
+    const sleep = function (ms) {
+      return new Promise(function (resolve) { later(resolve, ms); });
     };
     const tween = function (ms, fn) {
       return new Promise(function (resolve) {
-        const t0 = performance.now();
+        const t0 = vnow();
         let id = 0;
         const frame = function (now) {
           rafs.delete(id);
-          const p = Math.min(1, Math.max(0, (now - t0) / ms));
+          const vt = Math.min(now, pausedAt >= 0 ? pausedAt : now) - pausedTotal;
+          const p = Math.min(1, Math.max(0, (vt - t0) / ms));
           fn(p);
           if (p < 1) { id = requestAnimationFrame(frame); rafs.add(id); }
           else resolve();
@@ -846,6 +1015,43 @@
       };
       undo.push(off);
       return off;
+    };
+
+    function pauseClock() {
+      if (pausedAt >= 0) return;
+      pausedAt = performance.now();
+      pending.forEach(function (t) {
+        clearTimeout(t.handle);
+        t.remaining = Math.max(0, t.remaining - (pausedAt - t.started));
+      });
+    }
+    function resumeClock() {
+      if (pausedAt < 0) return;
+      pausedTotal += performance.now() - pausedAt;
+      pausedAt = -1;
+      pending.forEach(arm);
+    }
+    on(document, 'visibilitychange', function () {
+      if (document.hidden) pauseClock(); else resumeClock();
+    });
+    if (document.hidden) pauseClock();
+
+    /* Audio-parameter updates from per-frame tweens are limited to ~22 Hz
+       (the glides are smoothed on the audio thread anyway). */
+    let lastAudioPush = 0;
+    const audioDue = function (p) {
+      const t = performance.now();
+      if (p >= 1 || t - lastAudioPush >= 45) { lastAudioPush = t; return true; }
+      return false;
+    };
+
+    /* The audio path has output latency; delaying the visual of a hard sync
+       point by the same amount makes picture and sound land together. */
+    const avLag = function () {
+      try {
+        const a = ctx.audio;
+        return Math.min(120, Math.round(1000 * (a && a.latency ? a.latency() : 0)));
+      } catch (e) { return 0; }
     };
 
     /* ---- DOM helpers ---- */
@@ -1125,7 +1331,7 @@
     let arcPairs = [];
     let arcsDrawn = false;
     let resizeRaf = 0;
-    on(window, 'resize', function () {
+    const onResize = function () {
       if (resizeRaf) return;
       resizeRaf = requestAnimationFrame(function () {
         rafs.delete(resizeRaf);
@@ -1134,7 +1340,17 @@
         if (arcsDrawn) drawArcs();
       });
       rafs.add(resizeRaf);
-    });
+    };
+    // The observer fires after layout has settled (rotation included); the
+    // window listeners are the fallback for browsers without it.
+    if (typeof ResizeObserver === 'function') {
+      const ro = new ResizeObserver(onResize);
+      ro.observe(canvas);
+      undo.push(function () { ro.disconnect(); });
+    } else {
+      on(window, 'resize', onResize);
+      on(window, 'orientationchange', function () { later(onResize, 250); });
+    }
     undo.push(motion.subscribe(function (r) { rain.setReduced(r); }));
 
     /* ---- On-screen keyboard: keep the answer field and button visible ---- */
@@ -1150,11 +1366,17 @@
 
     /* ---- Counter ---- */
 
-    let counterValue = 0;
-    function setCounter(v) {
+    let counterValue = 0, numShown = 0, numAt = 0;
+    const numNode = numEl.firstChild;
+    function setCounter(v, force) {
       const nv = Math.max(counterValue, Math.floor(v));
       counterValue = nv;
-      numEl.textContent = fmt.format(nv);
+      const t = performance.now();
+      if ((force || t - numAt >= 33) && nv !== numShown) {   // text updates capped at ~30 Hz
+        numAt = t;
+        numShown = nv;
+        numNode.data = fmt.format(nv);
+      }
     }
     const tickPitch = function () { return 220 * Math.pow(2, Math.log10(counterValue + 10) / 3.2); };
     function flash() {
@@ -1194,9 +1416,11 @@
       open(counterWrap);
       ctx.announce('An illustrative counter of total arrivals, not distinct elements, begins counting upward.');
       await tween(10000, function (p) {
-        setCounter(90 * Math.pow(p * 8, 2.1));   // accelerating, ends near 7,092
-        snd.setTick(1.5 + 9 * p * p, tickPitch());
-        snd.setDrone(0.7 + 0.3 * p, 0.2);
+        setCounter(90 * Math.pow(p * 8, 2.1), p >= 1);   // accelerating, ends near 7,092
+        if (audioDue(p)) {
+          snd.setTick(1.5 + 9 * p * p, tickPitch());
+          snd.setDrone(0.7 + 0.3 * p, 0.2);
+        }
       });
     }
 
@@ -1215,7 +1439,7 @@
 
       await tween(T, function (p) {
         const v = p >= 1 ? 1e9 : Math.min(1e9, Math.round(v0 * Math.exp(k * p * T / 1000)));
-        setCounter(v);
+        setCounter(v, p >= 1);
         for (let i = 0; i < MILESTONES.length; i++) {
           const m = MILESTONES[i];
           if (!crossed.has(m) && counterValue >= m) {
@@ -1226,16 +1450,21 @@
         }
         rain.setDensity(0.55 + 0.45 * p);
         rain.setSpeed(1 + 1.4 * p);
-        snd.setRain(0.6 + 0.4 * p, 0.2);
-        snd.setSparkle(2.2 + 3 * p);
-        snd.setTick(9 * Math.pow(5.5, p), tickPitch());
-        snd.setRiser(p);
+        if (audioDue(p)) {
+          snd.setRain(0.6 + 0.4 * p, 0.2);
+          snd.setSparkle(2.2 + 3 * p);
+          snd.setTick(9 * Math.pow(5.5, p), tickPitch());
+          snd.setRiser(p);
+        }
       });
 
-      // Abrupt freeze at exactly one billion
-      rain.stop();
+      // Abrupt freeze at exactly one billion: the picture stops when the
+      // silence actually reaches the ear.
       snd.freeze();
-      setCounter(1e9);
+      const lag = avLag();
+      if (lag > 8) await sleep(lag);
+      rain.stop();
+      setCounter(1e9, true);
       counterWrap.classList.add('is-frozen');
       statusEl.classList.add('is-off');
       await sleep(2000);                // held silence
@@ -1452,6 +1681,7 @@
 
     async function scene4() {
       ctx.announce('Scene 4: The constraint. ' + COPY.s4lines.join(' '));
+      if (ctx.preloadNext) ctx.preloadNext();   // fetch the next Act while this one plays
       canvas.classList.remove('is-off');
       canvas.classList.add('is-subdued');
       veil.classList.add('is-on');
@@ -1532,10 +1762,11 @@
       await sleep(lead);
 
       // The strike: the line snaps in exactly on the hit
+      snd.boom();                       // first hit lands 10 ms from now
+      await sleep(10 + avLag());
       ctx.announce(COPY.closing);
       close1.classList.add('a1-hit');
       open(close1);
-      snd.boom();
       await sleep(900);
       snd.setDrone(0.45, 1.5);
       await sleep(FADE() + 3600);
@@ -1560,8 +1791,8 @@
     /* ---- Destroy: release everything ---- */
 
     return function destroy() {
-      timers.forEach(function (id) { clearTimeout(id); });
-      timers.clear();
+      pending.forEach(function (t) { clearTimeout(t.handle); });
+      pending.clear();
       rafs.forEach(function (id) { cancelAnimationFrame(id); });
       rafs.clear();
       undo.splice(0).forEach(function (fn) { fn(); });

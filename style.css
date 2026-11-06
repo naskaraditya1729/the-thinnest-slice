@@ -64,7 +64,7 @@ body {
 #app { position: fixed; inset: 0; }
 #stage { position: absolute; inset: 0; }
 
-.act { position: absolute; inset: 0; overflow: hidden; background: var(--bg); }
+.act { position: absolute; inset: 0; overflow: hidden; background: var(--bg); contain: layout paint style; }
 
 #cover {
   position: fixed;
@@ -73,6 +73,7 @@ body {
   opacity: 0;
   pointer-events: none;
   z-index: 100;
+  will-change: opacity;
   transition: opacity 0.7s var(--ease);
 }
 #cover.is-on { opacity: 1; pointer-events: auto; }
@@ -130,6 +131,8 @@ body {
   display: block;
   z-index: 0;
   opacity: 1;
+  contain: strict;
+  will-change: opacity;
   transition: opacity 1.6s var(--ease);
 }
 .a1-rain.is-subdued { opacity: 0.4; }
@@ -141,6 +144,7 @@ body {
   z-index: 1;
   pointer-events: none;
   opacity: 0;
+  will-change: opacity;
   transition: opacity 1.6s var(--ease);
   background: radial-gradient(ellipse 75% 65% at 50% 50%,
     rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0.45) 55%, rgba(0, 0, 0, 0) 100%);

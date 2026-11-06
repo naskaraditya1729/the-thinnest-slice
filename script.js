@@ -15,12 +15,15 @@
      motion:   { reduced(): boolean, subscribe(cb): unsubscribeFn }
      audio:    shared sound engine (see below)
      complete: () => void — the Act is finished; the controller enters the next
+     preloadNext: () => void — optional early fetch of the next Act's script
    }
 
    Shared audio engine (ctx.audio):
      context():      AudioContext, or null if the browser has no Web Audio
      output:         GainNode (master bus) — Acts connect their own nodes here
      running():      true once the browser has allowed audio (needs a gesture)
+     latency():      output latency in seconds (base + hardware, capped), for
+                     aligning a visual with the moment its sound is heard
      revealToggle(): fades in the small ENABLE SOUND / SOUND ON / SOUND OFF
                      button (bottom right)
    Acts own every node they create and must disconnect them on exit.
@@ -145,7 +148,9 @@
 
     if (AC) {
       try {
-        ac = new AC();
+        // "playback" favours uninterrupted output over minimum latency: the
+        // sound here is ambient and scheduled ahead of time.
+        try { ac = new AC({ latencyHint: 'playback' }); } catch (e) { ac = new AC(); }
         comp = ac.createDynamicsCompressor();
         comp.threshold.value = -20;
         comp.knee.value = 24;
@@ -163,6 +168,26 @@
     }
 
     function running() { return !!ac && ac.state === 'running'; }
+
+    function latency() {
+      if (!ac) return 0;
+      const l = (ac.baseLatency || 0) + (ac.outputLatency || 0);
+      return Math.max(0, Math.min(0.12, l));
+    }
+
+    /* iOS: a one-sample silent buffer played inside the gesture fully wakes
+       the audio hardware. */
+    let primed = false;
+    function prime() {
+      if (primed || !ac) return;
+      try {
+        const src = ac.createBufferSource();
+        src.buffer = ac.createBuffer(1, 1, 22050);
+        src.connect(ac.destination);
+        src.start(0);
+        primed = true;
+      } catch (e) { /* ignore */ }
+    }
 
     function label() {
       if (!running()) return ['ENABLE SOUND', 'Enable sound'];
@@ -194,7 +219,7 @@
       if (btn && e && btn.contains(e.target)) return;   // the toggle handles itself
       startKeepAlive();
       if (ac.state !== 'running' && !document.hidden) {
-        ac.resume().then(updateButton).catch(function () {});
+        ac.resume().then(function () { prime(); updateButton(); }).catch(function () {});
       }
     }
 
@@ -245,6 +270,7 @@
       context: function () { return ac; },
       output: master,
       running: running,
+      latency: latency,
       revealToggle: revealToggle
     };
   })();
@@ -255,17 +281,22 @@
     registry.set(id, mod);
   }
 
+  const loading = new Map();   // index -> Promise; one request per Act, however often asked
+
   function loadActScript(index) {
-    return new Promise(function (resolve) {
-      if (index < 0 || index >= ACT_SOURCES.length) return resolve(false);
-      if (registry.has(actId(index))) return resolve(true);
+    if (index < 0 || index >= ACT_SOURCES.length) return Promise.resolve(false);
+    if (registry.has(actId(index))) return Promise.resolve(true);
+    if (loading.has(index)) return loading.get(index);
+    const p = new Promise(function (resolve) {
       const s = document.createElement('script');
       s.src = ACT_SOURCES[index];
       s.async = true;
       s.onload = function () { resolve(registry.has(actId(index))); };
       s.onerror = function () { resolve(false); };
       document.head.appendChild(s);
-    });
+    }).then(function (ok) { loading.delete(index); return ok; });
+    loading.set(index, p);
+    return p;
   }
 
   /* ---- Act lifecycle ---------------------------------------------------- */
@@ -287,7 +318,8 @@
       announce: announce,
       motion: motion,
       audio: audio,
-      complete: function () { handleComplete(index); }
+      complete: function () { handleComplete(index); },
+      preloadNext: function () { loadActScript(index + 1); }
     });
     return true;
   }

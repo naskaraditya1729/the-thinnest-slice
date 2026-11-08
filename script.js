@@ -5,8 +5,9 @@
 
      window.TheThinnestSlice.registerAct('actN', {
        id: 'actN',
-       enter(ctx) { ... },   // build + run the Act inside ctx.root
-       exit()     { ... }    // remove ALL listeners/timers/rAF loops/DOM
+       soundDefault: 'off',   // optional: the Act starts muted (the visitor opts in)
+       enter(ctx) { ... },    // build + run the Act inside ctx.root
+       exit()     { ... }     // remove ALL listeners/timers/rAF loops/DOM/audio
      });
 
    ctx = {
@@ -14,7 +15,10 @@
      announce: (message) => void — polite screen-reader announcement
      motion:   { reduced(): boolean, subscribe(cb): unsubscribeFn }
      audio:    shared sound engine (see below)
-     complete: () => void — the Act is finished; the controller enters the next
+     nav:      Back / Forward cluster (see below)
+     complete: () => Promise<boolean> — the Act is finished; the controller enters
+               the next Act. Resolves true if a transition happened, false if
+               there is no next Act yet.
      preloadNext: () => void — optional early fetch of the next Act's script
    }
 
@@ -22,16 +26,23 @@
      context():      AudioContext, or null if the browser has no Web Audio
      output:         GainNode (master bus) — Acts connect their own nodes here
      running():      true once the browser has allowed audio (needs a gesture)
-     latency():      output latency in seconds (base + hardware, capped), for
-                     aligning a visual with the moment its sound is heard
-     revealToggle(): fades in the small ENABLE SOUND / SOUND ON / SOUND OFF
-                     button (bottom right)
-   Acts own every node they create and must disconnect them on exit.
+     muted():        true while the visitor has sound switched off
+     setMuted(v):    switch sound off / on (smooth)
+     onChange(cb):   cb(muted) on every change; returns an unsubscribe function
+     latency():      output latency in seconds (capped)
+     revealToggle(): fades in the sound button (bottom right)
+
+   Navigation (ctx.nav):
+     bind({ back, forward }) -> unbind
+         Shows the Back / Forward buttons and routes them, and the Left / Right
+         arrow keys, to the two handlers. Arrow keys are ignored while an input,
+         slider or other control outside the cluster has focus.
+     set({ back: bool, forward: bool, forwardLabel: string, forwardAria: string })
+         Enabled state and label of the buttons.
 
    Mobile notes:
-     - Audio is re-resumed on any later gesture (iOS "interrupted" state),
-       and iOS is switched to the "playback" audio session so sound is not
-       silenced by the ringer switch.
+     - Audio is re-resumed on any later gesture (iOS "interrupted" state), and
+       iOS is switched to the "playback" audio session.
      - The on-screen keyboard height is published as the CSS variable --kb on
        #app so Acts can keep inputs visible.
    ========================================================================== */
@@ -99,6 +110,86 @@
     sync();
   })();
 
+  /* ---- Controls cluster: [ Back ] [ Forward ] [ Sound ] ------------------ */
+
+  const controls = document.createElement('div');
+  controls.id = 'controls';
+  controls.className = 'controls';
+  controls.setAttribute('role', 'group');
+  controls.setAttribute('aria-label', 'Navigation and sound');
+
+  function makeCtl(text, aria, extra) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ctl ' + (extra || '');
+    b.textContent = text;
+    b.setAttribute('aria-label', aria);
+    return b;
+  }
+  const btnBack = makeCtl('\u2039 BACK', 'Back', 'ctl-nav');
+  const btnFwd = makeCtl('FORWARD \u203A', 'Forward', 'ctl-nav');
+  const soundBtn = makeCtl('ENABLE SOUND', 'Enable sound', 'sound-toggle');
+  btnBack.hidden = true;
+  btnFwd.hidden = true;
+  controls.append(btnBack, btnFwd, soundBtn);
+  app.appendChild(controls);
+
+  /* ---- Navigation API ---------------------------------------------------- */
+
+  const nav = (function () {
+    let handlers = null;
+
+    btnBack.addEventListener('click', function () { if (handlers && handlers.back) handlers.back(); });
+    btnFwd.addEventListener('click', function () { if (handlers && handlers.forward) handlers.forward(); });
+
+    document.addEventListener('keydown', function (e) {
+      if (!handlers || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const t = e.target;
+      if (t && t !== document.body && t !== document.documentElement && !controls.contains(t) && t.closest &&
+          t.closest('input, select, textarea, button, a, [contenteditable], [role="slider"], [tabindex]')) return;
+      e.preventDefault();
+      const fn = e.key === 'ArrowLeft' ? handlers.back : handlers.forward;
+      if (fn) fn();
+    });
+
+    function bind(h) {
+      handlers = h;
+      btnBack.hidden = false;
+      btnFwd.hidden = false;
+      controls.classList.add('is-nav');
+      requestAnimationFrame(function () {
+        btnBack.classList.add('is-on');
+        btnFwd.classList.add('is-on');
+      });
+      audio.revealToggle();
+      return function unbind() { if (handlers === h) reset(); };
+    }
+
+    function set(o) {
+      if (!o) return;
+      if ('back' in o) btnBack.disabled = !o.back;
+      if ('forward' in o) btnFwd.disabled = !o.forward;
+      if (o.forwardLabel) btnFwd.textContent = o.forwardLabel === 'FORWARD' ? 'FORWARD \u203A' : o.forwardLabel;
+      if (o.forwardAria) btnFwd.setAttribute('aria-label', o.forwardAria);
+    }
+
+    function reset() {
+      handlers = null;
+      btnBack.hidden = true;
+      btnFwd.hidden = true;
+      btnBack.classList.remove('is-on');
+      btnFwd.classList.remove('is-on');
+      btnBack.disabled = false;
+      btnFwd.disabled = false;
+      btnFwd.textContent = 'FORWARD \u203A';
+      btnFwd.setAttribute('aria-label', 'Forward');
+      controls.classList.remove('is-nav');
+    }
+
+    return { bind: bind, set: set, reset: reset };
+  })();
+
   /* ---- Shared audio engine ---------------------------------------------- */
 
   const audio = (function () {
@@ -108,8 +199,8 @@
       (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
     let ac = null, master = null, comp = null;
     let muted = false, suspendedByHidden = false;
-    let btn = null;
     let keepAlive = null, keepAliveWanted = false;
+    const listeners = new Set();
 
     /* iOS: route Web Audio through the "playback" session so the ringer
        switch does not silence it. */
@@ -167,6 +258,8 @@
       }
     }
 
+    if (!ac) soundBtn.hidden = true;
+
     function running() { return !!ac && ac.state === 'running'; }
 
     function latency() {
@@ -190,24 +283,33 @@
     }
 
     function label() {
+      if (muted) return ['SOUND OFF', 'Sound is off. Activate to turn sound on.'];
       if (!running()) return ['ENABLE SOUND', 'Enable sound'];
-      return muted
-        ? ['SOUND OFF', 'Sound is off. Activate to turn sound on.']
-        : ['SOUND ON', 'Sound is on. Activate to mute.'];
+      return ['SOUND ON', 'Sound is on. Activate to turn sound off.'];
     }
 
     function updateButton() {
-      if (!btn) return;
       const l = label();
-      btn.textContent = l[0];
-      btn.setAttribute('aria-label', l[1]);
+      soundBtn.textContent = l[0];
+      soundBtn.setAttribute('aria-label', l[1]);
     }
 
     function applyMute() {
       if (!master) return;
       const t = ac.currentTime;
+      const cur = master.gain.value;
       master.gain.cancelScheduledValues(t);
+      master.gain.setValueAtTime(cur, t);
       master.gain.setTargetAtTime(muted ? 0 : MASTER_LEVEL, t, 0.06);
+    }
+
+    function setMuted(v) {
+      v = !!v;
+      if (v === muted) { updateButton(); return; }
+      muted = v;
+      applyMute();
+      updateButton();
+      listeners.forEach(function (cb) { try { cb(muted); } catch (e) { /* ignore */ } });
     }
 
     /* Unlock: browsers only allow audio after a user gesture. The listener
@@ -216,7 +318,7 @@
     const GESTURES = ['pointerdown', 'touchend', 'keydown', 'click'];
     function onGesture(e) {
       if (!ac) return;
-      if (btn && e && btn.contains(e.target)) return;   // the toggle handles itself
+      if (e && soundBtn.contains(e.target)) return;   // the toggle handles itself
       startKeepAlive();
       if (ac.state !== 'running' && !document.hidden) {
         ac.resume().then(function () { prime(); updateButton(); }).catch(function () {});
@@ -242,34 +344,35 @@
           }
         }
       });
-    }
 
-    function ensureButton() {
-      if (btn || !ac) return;
-      btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'sound-toggle';
-      btn.addEventListener('click', function () {
+      soundBtn.addEventListener('click', function () {
         startKeepAlive();
-        if (!running()) { ac.resume().then(updateButton).catch(function () {}); return; }
-        muted = !muted;
-        applyMute();
-        updateButton();
+        if (muted) {                                  // turn sound on (explicit activation)
+          setMuted(false);
+          if (!running()) ac.resume().then(function () { prime(); updateButton(); }).catch(function () {});
+          return;
+        }
+        if (!running()) { ac.resume().then(function () { prime(); updateButton(); }).catch(function () {}); return; }
+        setMuted(true);
       });
-      app.appendChild(btn);
       updateButton();
     }
 
     function revealToggle() {
       if (!ac) return;
-      ensureButton();
-      requestAnimationFrame(function () { if (btn) btn.classList.add('is-on'); });
+      requestAnimationFrame(function () { soundBtn.classList.add('is-on'); });
     }
 
     return {
       context: function () { return ac; },
       output: master,
       running: running,
+      muted: function () { return muted; },
+      setMuted: setMuted,
+      onChange: function (cb) {
+        listeners.add(cb);
+        return function () { listeners.delete(cb); };
+      },
       latency: latency,
       revealToggle: revealToggle
     };
@@ -313,12 +416,15 @@
 
     current = { index: index, mod: mod, section: section, completed: false };
 
+    if (mod.soundDefault === 'off') audio.setMuted(true);
+
     mod.enter({
       root: section,
       announce: announce,
       motion: motion,
       audio: audio,
-      complete: function () { handleComplete(index); },
+      nav: { bind: nav.bind, set: nav.set },
+      complete: function () { return handleComplete(index); },
       preloadNext: function () { loadActScript(index + 1); }
     });
     return true;
@@ -327,23 +433,25 @@
   function leaveCurrent() {
     if (!current) return;
     try { current.mod.exit(); } catch (err) { console.error('[Controller] Act exit failed:', err); }
+    nav.reset();
     if (current.section.parentNode) current.section.parentNode.removeChild(current.section);
     current = null;
   }
 
   function handleComplete(index) {
-    if (!current || current.index !== index || current.completed || transitioning) return;
+    if (!current || current.index !== index || current.completed || transitioning) return Promise.resolve(false);
     current.completed = true;
 
     const next = index + 1;
-    if (next >= ACT_SOURCES.length) return;
+    if (next >= ACT_SOURCES.length) { current.completed = false; return Promise.resolve(false); }
 
-    loadActScript(next).then(function (ok) {
+    return loadActScript(next).then(function (ok) {
       if (!ok) {
         console.info('[Controller] Act ' + (next + 1) + ' is not available yet; remaining on Act ' + (index + 1) + '.');
-        return null;
+        if (current && current.index === index) current.completed = false;
+        return false;
       }
-      return transitionTo(next);
+      return transitionTo(next).then(function () { return true; });
     });
   }
 

@@ -9,7 +9,9 @@
    They are NOT any algorithm's data structure.
 
    Sound is synthesised live with Web Audio (no audio files). All levels live
-   in the SND block below.
+   in the SND block below. The AudioContext does not exist until the visitor's
+   first click / tap / key press; until then ambient settings are remembered
+   and applied the moment it appears (see lazySound).
    ========================================================================== */
 
 (function () {
@@ -88,6 +90,8 @@
   const SND_API = ['setMood', 'setDrone', 'setRain', 'setSparkle', 'setTick', 'setRiser', 'setPulse',
     'chime', 'note', 'dull', 'pop', 'tap', 'wrong', 'success', 'confirm', 'milestone', 'eight',
     'glimmer', 'whoosh', 'beat', 'swell', 'riseIn', 'boom', 'freeze', 'restore', 'fadeOut', 'destroy'];
+  // Ambient "state" calls: remembered while there is no AudioContext yet, replayed when it appears.
+  const STATE_FNS = ['setMood', 'setDrone', 'setRain', 'setSparkle', 'setTick', 'setPulse', 'setRiser'];
 
   /* ========================================================================
      Procedural sound engine for this Act
@@ -617,6 +621,44 @@
     return api;
   }
 
+  /* The sound engine needs an AudioContext, which browsers only allow after
+     the visitor's first click / tap / key press. Until then this wrapper
+     remembers the latest ambient settings (drone, rain, ...) and drops
+     one-shot sounds (nothing could be heard anyway). When the context
+     appears the real engine is built and the settings are replayed. */
+  function lazySound(audio) {
+    let real = null, off = null, gone = false;
+    const last = {};
+    const api = {};
+
+    function build() {
+      if (gone || real) return;
+      real = createSound(audio);
+      STATE_FNS.forEach(function (n) {
+        const a = last[n];
+        if (!a) return;
+        if (n === 'setMood' || n === 'setDrone' || n === 'setRain') a[1] = 0.6;
+        real[n].apply(real, a);
+      });
+    }
+
+    SND_API.forEach(function (name) {
+      api[name] = function () {
+        if (real) return real[name].apply(real, arguments);
+        if (STATE_FNS.indexOf(name) >= 0) last[name] = Array.prototype.slice.call(arguments);
+      };
+    });
+    api.destroy = function () {
+      gone = true;
+      if (off) { off(); off = null; }
+      if (real) { real.destroy(); real = null; }
+    };
+
+    if (!audio || !audio.supported || !audio.onReady) real = createSound(audio);   // silent stub
+    else off = audio.onReady(build);
+    return api;
+  }
+
   /* ========================================================================
      Procedural rain renderer (canvas, one draw pass per frame; no per-glyph
      DOM nodes). Glyphs are pre-rendered once into an atlas and blitted with
@@ -961,10 +1003,11 @@
     const root = ctx.root;
     const motion = ctx.motion;
     const fmt = new Intl.NumberFormat('en-US');
-    const snd = createSound(ctx.audio);
+    const snd = lazySound(ctx.audio);
 
     const rafs = new Set();
     const undo = [];
+    let destroyed = false;
 
     const FADE = function () { return motion.reduced() ? 0 : 1200; };
 
@@ -1284,6 +1327,26 @@
 
     root.append(canvas, veil, secA, secB, secC, hint, gateLive);
 
+    /* ---- Back / Forward arrows (bottom right, beside the sound button) ----
+       Back has nowhere to go from Act I, so it stays disabled. Forward jumps
+       to the next Act and is enabled only once that Act actually exists. The
+       arrow KEYS are left alone here: the click-to-continue screens use them. */
+
+    const unbindNav = ctx.nav
+      ? ctx.nav.bind({
+          back: function () {},
+          forward: function () { ctx.complete(); }
+        }, { keys: false, reveal: false })
+      : function () {};
+    if (ctx.nav) {
+      ctx.nav.set({ back: false, forward: false });
+      if (ctx.nextReady) {
+        ctx.nextReady().then(function (ok) {
+          if (!destroyed) ctx.nav.set({ forward: !!ok });
+        });
+      }
+    }
+
     /* ---- Click / tap / key gate: a screen that waits for the visitor ---- */
 
     function gate() {
@@ -1399,7 +1462,7 @@
       snd.setSparkle(2.2);
 
       await sleep(5000); // rain only
-      if (ctx.audio && ctx.audio.revealToggle) ctx.audio.revealToggle();
+      if (ctx.audio && ctx.audio.revealToggle) ctx.audio.revealToggle();   // sound + arrows fade in
       await sleep(1200);
 
       ctx.announce('Act I, scene 1: The rain. ' + COPY.s1.join(' '));
@@ -1791,6 +1854,8 @@
     /* ---- Destroy: release everything ---- */
 
     return function destroy() {
+      destroyed = true;
+      unbindNav();
       pending.forEach(function (t) { clearTimeout(t.handle); });
       pending.clear();
       rafs.forEach(function (id) { cancelAnimationFrame(id); });

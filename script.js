@@ -10,33 +10,47 @@
        exit()     { ... }     // remove ALL listeners/timers/rAF loops/DOM/audio
      });
 
+   A script that registers an id other than the one being loaded is ignored.
+
    ctx = {
      root:     HTMLElement — the Act's own container (owned by the controller)
      announce: (message) => void — polite screen-reader announcement
      motion:   { reduced(): boolean, subscribe(cb): unsubscribeFn }
      audio:    shared sound engine (see below)
      nav:      Back / Forward cluster (see below)
-     complete: () => Promise<boolean> — the Act is finished; the controller enters
-               the next Act. Resolves true if a transition happened, false if
-               there is no next Act yet.
+     complete: () => Promise<boolean> — go to the next Act. Resolves true if a
+               transition happened, false if there is no next Act.
+     previous: () => Promise<boolean> — go back to the previous Act (false on Act I).
+     hasPrevious: boolean
+     nextReady: () => Promise<boolean> — resolves true when the next Act exists
+               and is loaded (use it to enable a Forward button).
      preloadNext: () => void — optional early fetch of the next Act's script
    }
 
-   Shared audio engine (ctx.audio):
-     context():      AudioContext, or null if the browser has no Web Audio
+   Shared audio engine (ctx.audio). The AudioContext is created lazily, on the
+   visitor's first click / tap / key press (browsers refuse to start audio
+   before that), so context() is null until then.
+     supported:      false if the browser has no Web Audio
+     context():      AudioContext, or null if not created yet / unsupported
+     onReady(cb):    cb() once the context exists (immediately if it already
+                     does); returns an unsubscribe function
      output:         GainNode (master bus) — Acts connect their own nodes here
-     running():      true once the browser has allowed audio (needs a gesture)
+     running():      true once the context is running
      muted():        true while the visitor has sound switched off
      setMuted(v):    switch sound off / on (smooth)
      onChange(cb):   cb(muted) on every change; returns an unsubscribe function
      latency():      output latency in seconds (capped)
-     revealToggle(): fades in the sound button (bottom right)
+     revealToggle(): fades in the bottom-right controls (sound, and Back /
+                     Forward if an Act has bound them)
 
    Navigation (ctx.nav):
-     bind({ back, forward }) -> unbind
-         Shows the Back / Forward buttons and routes them, and the Left / Right
-         arrow keys, to the two handlers. Arrow keys are ignored while an input,
-         slider or other control outside the cluster has focus.
+     bind({ back, forward }, { keys: true, reveal: true }) -> unbind
+         Shows the Back / Forward buttons and routes them to the two handlers.
+         keys:false  = do not bind the Left / Right arrow keys (the Act uses
+                       them itself). With keys on, arrows are ignored while an
+                       input, slider or other control outside the cluster has
+                       focus.
+         reveal:false = keep the buttons invisible until revealToggle().
      set({ back: bool, forward: bool, forwardLabel: string, forwardAria: string })
          Enabled state and label of the buttons.
 
@@ -56,6 +70,8 @@
   ];
 
   const registry = new Map();
+  const expecting = new Set();     // act ids whose scripts are loading right now
+  const missing = new Set();       // indices whose script failed or registered nothing
   const stage = document.getElementById('stage');
   const live = document.getElementById('live');
   const cover = document.getElementById('cover');
@@ -64,6 +80,7 @@
   let current = null;       // { index, mod, section, completed }
   let transitioning = false;
   let announceTimer = 0;
+  let chromeShown = false;
 
   /* ---- Shared utilities ------------------------------------------------- */
 
@@ -110,7 +127,7 @@
     sync();
   })();
 
-  /* ---- Controls cluster: [ Back ] [ Forward ] [ Sound ] ------------------ */
+  /* ---- Controls cluster: [ < ] [ > ] [ Sound ] --------------------------- */
 
   const controls = document.createElement('div');
   controls.id = 'controls';
@@ -126,43 +143,65 @@
     b.setAttribute('aria-label', aria);
     return b;
   }
-  const btnBack = makeCtl('\u2039 BACK', 'Back', 'ctl-nav');
-  const btnFwd = makeCtl('FORWARD \u203A', 'Forward', 'ctl-nav');
+  const GLYPH_BACK = '\u2039';   // ‹
+  const GLYPH_FWD = '\u203A';    // ›
+  const btnBack = makeCtl(GLYPH_BACK, 'Back', 'ctl-nav');
+  const btnFwd = makeCtl(GLYPH_FWD, 'Forward', 'ctl-nav');
   const soundBtn = makeCtl('ENABLE SOUND', 'Enable sound', 'sound-toggle');
+  [btnBack, btnFwd].forEach(function (b) {
+    b.style.fontSize = '1.4rem';
+    b.style.letterSpacing = '0';
+    b.style.textIndent = '0';
+    b.style.minWidth = '3rem';
+    b.style.padding = '0 0.5rem';
+  });
   btnBack.hidden = true;
   btnFwd.hidden = true;
+  btnBack.disabled = true;
+  btnFwd.disabled = true;
   controls.append(btnBack, btnFwd, soundBtn);
   app.appendChild(controls);
+
+  /* Fades in the sound button and, if an Act has bound them, the arrows. */
+  function revealChrome() {
+    chromeShown = true;
+    requestAnimationFrame(function () {
+      if (!soundBtn.hidden) soundBtn.classList.add('is-on');
+      if (!btnBack.hidden) btnBack.classList.add('is-on');
+      if (!btnFwd.hidden) btnFwd.classList.add('is-on');
+    });
+  }
 
   /* ---- Navigation API ---------------------------------------------------- */
 
   const nav = (function () {
     let handlers = null;
+    let keysOn = true;
 
-    btnBack.addEventListener('click', function () { if (handlers && handlers.back) handlers.back(); });
-    btnFwd.addEventListener('click', function () { if (handlers && handlers.forward) handlers.forward(); });
+    btnBack.addEventListener('click', function () { if (handlers && handlers.back && !btnBack.disabled) handlers.back(); });
+    btnFwd.addEventListener('click', function () { if (handlers && handlers.forward && !btnFwd.disabled) handlers.forward(); });
 
     document.addEventListener('keydown', function (e) {
-      if (!handlers || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      if (!handlers || !keysOn || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
       const t = e.target;
       if (t && t !== document.body && t !== document.documentElement && !controls.contains(t) && t.closest &&
           t.closest('input, select, textarea, button, a, [contenteditable], [role="slider"], [tabindex]')) return;
+      const left = e.key === 'ArrowLeft';
+      const btn = left ? btnBack : btnFwd;
+      if (btn.disabled) return;
       e.preventDefault();
-      const fn = e.key === 'ArrowLeft' ? handlers.back : handlers.forward;
+      const fn = left ? handlers.back : handlers.forward;
       if (fn) fn();
     });
 
-    function bind(h) {
+    function bind(h, opts) {
       handlers = h;
+      keysOn = !(opts && opts.keys === false);
       btnBack.hidden = false;
       btnFwd.hidden = false;
       controls.classList.add('is-nav');
-      requestAnimationFrame(function () {
-        btnBack.classList.add('is-on');
-        btnFwd.classList.add('is-on');
-      });
-      audio.revealToggle();
+      if (!(opts && opts.reveal === false) || chromeShown) revealChrome();
       return function unbind() { if (handlers === h) reset(); };
     }
 
@@ -170,19 +209,29 @@
       if (!o) return;
       if ('back' in o) btnBack.disabled = !o.back;
       if ('forward' in o) btnFwd.disabled = !o.forward;
-      if (o.forwardLabel) btnFwd.textContent = o.forwardLabel === 'FORWARD' ? 'FORWARD \u203A' : o.forwardLabel;
+      if (o.forwardLabel) {
+        const plain = o.forwardLabel === 'FORWARD';
+        btnFwd.textContent = plain ? GLYPH_FWD : o.forwardLabel;
+        btnFwd.style.fontSize = plain ? '1.4rem' : '';
+        btnFwd.style.letterSpacing = plain ? '0' : '';
+        btnFwd.style.textIndent = plain ? '0' : '';
+      }
       if (o.forwardAria) btnFwd.setAttribute('aria-label', o.forwardAria);
     }
 
     function reset() {
       handlers = null;
+      keysOn = true;
       btnBack.hidden = true;
       btnFwd.hidden = true;
       btnBack.classList.remove('is-on');
       btnFwd.classList.remove('is-on');
-      btnBack.disabled = false;
-      btnFwd.disabled = false;
-      btnFwd.textContent = 'FORWARD \u203A';
+      btnBack.disabled = true;
+      btnFwd.disabled = true;
+      btnFwd.textContent = GLYPH_FWD;
+      btnFwd.style.fontSize = '1.4rem';
+      btnFwd.style.letterSpacing = '0';
+      btnFwd.style.textIndent = '0';
       btnFwd.setAttribute('aria-label', 'Forward');
       controls.classList.remove('is-nav');
     }
@@ -194,13 +243,15 @@
 
   const audio = (function () {
     const AC = window.AudioContext || window.webkitAudioContext;
+    const supported = !!AC;
     const MASTER_LEVEL = 0.85;
     const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
       (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-    let ac = null, master = null, comp = null;
+    let ac = null, master = null, comp = null, failed = false;
     let muted = false, suspendedByHidden = false;
     let keepAlive = null, keepAliveWanted = false;
     const listeners = new Set();
+    const readyCbs = new Set();
 
     /* iOS: route Web Audio through the "playback" session so the ringer
        switch does not silence it. */
@@ -237,28 +288,7 @@
       } catch (e) { /* ignore */ }
     }
 
-    if (AC) {
-      try {
-        // "playback" favours uninterrupted output over minimum latency: the
-        // sound here is ambient and scheduled ahead of time.
-        try { ac = new AC({ latencyHint: 'playback' }); } catch (e) { ac = new AC(); }
-        comp = ac.createDynamicsCompressor();
-        comp.threshold.value = -20;
-        comp.knee.value = 24;
-        comp.ratio.value = 4;
-        comp.attack.value = 0.01;
-        comp.release.value = 0.3;
-        master = ac.createGain();
-        master.gain.value = MASTER_LEVEL;
-        master.connect(comp);
-        comp.connect(ac.destination);
-      } catch (err) {
-        ac = null; master = null;
-        console.warn('[Audio] Web Audio unavailable:', err);
-      }
-    }
-
-    if (!ac) soundBtn.hidden = true;
+    if (!supported) soundBtn.hidden = true;
 
     function running() { return !!ac && ac.state === 'running'; }
 
@@ -312,25 +342,57 @@
       listeners.forEach(function (cb) { try { cb(muted); } catch (e) { /* ignore */ } });
     }
 
+    /* Creates the AudioContext. Only ever called from a user gesture, so the
+       browser allows it to start (no autoplay warning). */
+    function ensure() {
+      if (ac || !supported || failed) return ac;
+      try {
+        // "playback" favours uninterrupted output over minimum latency: the
+        // sound here is ambient and scheduled ahead of time.
+        try { ac = new AC({ latencyHint: 'playback' }); } catch (e) { ac = new AC(); }
+        comp = ac.createDynamicsCompressor();
+        comp.threshold.value = -20;
+        comp.knee.value = 24;
+        comp.ratio.value = 4;
+        comp.attack.value = 0.01;
+        comp.release.value = 0.3;
+        master = ac.createGain();
+        master.gain.value = muted ? 0 : MASTER_LEVEL;
+        master.connect(comp);
+        comp.connect(ac.destination);
+        ac.onstatechange = updateButton;
+      } catch (err) {
+        ac = null; master = null; failed = true;
+        soundBtn.hidden = true;
+        console.warn('[Audio] Web Audio unavailable:', err);
+        return null;
+      }
+      updateButton();
+      readyCbs.forEach(function (cb) { try { cb(); } catch (e) { console.error('[Audio] ready callback failed:', e); } });
+      readyCbs.clear();
+      return ac;
+    }
+
     /* Unlock: browsers only allow audio after a user gesture. The listener
        stays attached so audio can be recovered after a mobile interruption
        (phone call, app switch, lock screen). */
     const GESTURES = ['pointerdown', 'touchend', 'keydown', 'click'];
     function onGesture(e) {
-      if (!ac) return;
+      if (!supported) return;
       if (e && soundBtn.contains(e.target)) return;   // the toggle handles itself
+      ensure();
+      if (!ac) return;
       startKeepAlive();
       if (ac.state !== 'running' && !document.hidden) {
         ac.resume().then(function () { prime(); updateButton(); }).catch(function () {});
       }
     }
 
-    if (ac) {
+    if (supported) {
       GESTURES.forEach(function (t) { window.addEventListener(t, onGesture, { capture: true, passive: true }); });
-      ac.onstatechange = updateButton;
-      ac.resume().then(updateButton).catch(function () {});
 
       document.addEventListener('visibilitychange', function () {
+        if (!ac) return;
         if (document.hidden) {
           if (keepAlive) { try { keepAlive.pause(); } catch (e) { /* ignore */ } }
           if (ac.state === 'running') { suspendedByHidden = true; ac.suspend().catch(function () {}); }
@@ -346,26 +408,30 @@
       });
 
       soundBtn.addEventListener('click', function () {
+        ensure();
+        if (!ac) return;
         startKeepAlive();
+        const wake = function () { ac.resume().then(function () { prime(); updateButton(); }).catch(function () {}); };
         if (muted) {                                  // turn sound on (explicit activation)
           setMuted(false);
-          if (!running()) ac.resume().then(function () { prime(); updateButton(); }).catch(function () {});
+          if (!running()) wake();
           return;
         }
-        if (!running()) { ac.resume().then(function () { prime(); updateButton(); }).catch(function () {}); return; }
+        if (!running()) { wake(); return; }
         setMuted(true);
       });
       updateButton();
     }
 
-    function revealToggle() {
-      if (!ac) return;
-      requestAnimationFrame(function () { soundBtn.classList.add('is-on'); });
-    }
-
     return {
+      supported: supported,
       context: function () { return ac; },
-      output: master,
+      get output() { return master; },
+      onReady: function (cb) {
+        if (ac) { cb(); return function () {}; }
+        readyCbs.add(cb);
+        return function () { readyCbs.delete(cb); };
+      },
       running: running,
       muted: function () { return muted; },
       setMuted: setMuted,
@@ -374,13 +440,18 @@
         return function () { listeners.delete(cb); };
       },
       latency: latency,
-      revealToggle: revealToggle
+      revealToggle: revealChrome
     };
   })();
 
   /* ---- Act registry and loading ----------------------------------------- */
 
   function registerAct(id, mod) {
+    if (expecting.size && !expecting.has(id)) {
+      console.warn('[Controller] Ignored a script that registered "' + id + '" while loading ' +
+        Array.from(expecting).join(', ') + '. Check that the file is the right Act.');
+      return;
+    }
     registry.set(id, mod);
   }
 
@@ -389,15 +460,23 @@
   function loadActScript(index) {
     if (index < 0 || index >= ACT_SOURCES.length) return Promise.resolve(false);
     if (registry.has(actId(index))) return Promise.resolve(true);
+    if (missing.has(index)) return Promise.resolve(false);
     if (loading.has(index)) return loading.get(index);
+    const id = actId(index);
+    expecting.add(id);
     const p = new Promise(function (resolve) {
       const s = document.createElement('script');
       s.src = ACT_SOURCES[index];
       s.async = true;
-      s.onload = function () { resolve(registry.has(actId(index))); };
+      s.onload = function () { resolve(registry.has(id)); };
       s.onerror = function () { resolve(false); };
       document.head.appendChild(s);
-    }).then(function (ok) { loading.delete(index); return ok; });
+    }).then(function (ok) {
+      expecting.delete(id);
+      loading.delete(index);
+      if (!ok) missing.add(index);
+      return ok;
+    });
     loading.set(index, p);
     return p;
   }
@@ -425,6 +504,9 @@
       audio: audio,
       nav: { bind: nav.bind, set: nav.set },
       complete: function () { return handleComplete(index); },
+      previous: function () { return handleBack(index); },
+      hasPrevious: index > 0,
+      nextReady: function () { return loadActScript(index + 1); },
       preloadNext: function () { loadActScript(index + 1); }
     });
     return true;
@@ -447,11 +529,19 @@
 
     return loadActScript(next).then(function (ok) {
       if (!ok) {
-        console.info('[Controller] Act ' + (next + 1) + ' is not available yet; remaining on Act ' + (index + 1) + '.');
+        console.info('[Controller] Act ' + (next + 1) + ' is not available yet (Acts/' + actId(next) + '.js is missing or does not register "' + actId(next) + '"); remaining on Act ' + (index + 1) + '.');
         if (current && current.index === index) current.completed = false;
         return false;
       }
       return transitionTo(next).then(function () { return true; });
+    });
+  }
+
+  function handleBack(index) {
+    if (!current || current.index !== index || transitioning || index <= 0) return Promise.resolve(false);
+    return loadActScript(index - 1).then(function (ok) {
+      if (!ok) return false;
+      return transitionTo(index - 1).then(function () { return true; });
     });
   }
 
